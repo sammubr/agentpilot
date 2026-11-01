@@ -1,0 +1,14 @@
+# Install: copy to ~/.config/systemd/user/agentpilot.service, set WorkingDirectory to your repo,
+# then run `systemctl --user daemon-reload` and `systemctl --user enable --now agentpilot.service`.
+[Unit]
+Description=AgentPilot development orchestrator
+
+[Service]
+Type=simple
+WorkingDirectory=%h/<repo>
+ExecStart=%h/.local/bin/agentpilot resume
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

@@ -222,3 +222,5 @@ __marimo__/
 .specify
 .claude
 .opencode
+specs
+src/out.txt
