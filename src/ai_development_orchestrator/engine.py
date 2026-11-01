@@ -249,7 +249,7 @@ class Engine:
 
     def _start_branch(self, feature: Feature) -> None:
         dirty = gitops.dirty_files(self.ws.repo)
-        if self.cfg.git.branch_per_feature and gitops.is_repo(self.ws.repo) and not dirty:
+        if self.cfg.git.branch_per_feature and gitops.repos(self.ws.repo) and not dirty:
             feature.branch = gitops.ensure_branch(self.ws.repo, self.cfg.git.branch_prefix + feature.id)
             feature.branch = gitops.current_branch(self.ws.repo)
         elif self.cfg.git.allow_dirty_start:

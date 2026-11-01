@@ -15,106 +15,132 @@ def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)
 
 
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return _run(["git", *args], cwd)
+
+
+def _check(cwd: Path, *args: str) -> None:
+    r = _git(cwd, *args)
+    if r.returncode != 0:
+        raise GitError(f"git {' '.join(args[:2])} failed in {cwd}", ["git", *args], r.stderr)
+
+
 def is_repo(cwd: Path) -> bool:
-    r = _run(["git", "rev-parse", "--git-dir"], cwd)
-    return r.returncode == 0
+    return _git(cwd, "rev-parse", "--git-dir").returncode == 0
 
 
-def current_branch(cwd: Path) -> str | None:
-    r = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    if r.returncode != 0:
+def repos(root: Path) -> list[Path]:
+    if is_repo(root):
+        return [root]
+    return sorted(path.parent for path in root.glob("*/.git"))
+
+
+def _prefix(root: Path, repo: Path) -> str:
+    return "" if repo == root else repo.relative_to(root).as_posix() + "/"
+
+
+def _combine(root: Path, values: dict[Path, str]) -> str | None:
+    if not values:
         return None
-    return r.stdout.strip()
+    if list(values) == [root]:
+        return values[root]
+    return ";".join(f"{_prefix(root, repo).rstrip('/')}={value}" for repo, value in values.items())
 
 
-def head_sha(cwd: Path) -> str | None:
-    r = _run(["git", "rev-parse", "HEAD"], cwd)
-    if r.returncode != 0:
-        return None
-    return r.stdout.strip()
+def _split(root: Path, combined: str | None) -> dict[Path, str]:
+    if not combined:
+        return {}
+    if "=" not in combined:
+        return {repo: combined for repo in repos(root)}
+    pairs = (item.split("=", 1) for item in combined.split(";"))
+    return {root / name: value for name, value in pairs}
 
 
-def dirty_files(cwd: Path, exclude: list[str] | None = None) -> list[str]:
-    exclude = exclude or [".orchestrator/"]
-    r = _run(["git", "status", "--porcelain", "-z"], cwd)
+def _repo_branch(repo: Path) -> str | None:
+    r = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _repo_head(repo: Path) -> str | None:
+    r = _git(repo, "rev-parse", "HEAD")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def current_branch(root: Path) -> str | None:
+    branches = {repo: branch for repo in repos(root) if (branch := _repo_branch(repo))}
+    if len(set(branches.values())) == 1:
+        return next(iter(branches.values()))
+    return _combine(root, branches)
+
+
+def head_sha(root: Path) -> str | None:
+    return _combine(root, {repo: sha for repo in repos(root) if (sha := _repo_head(repo))})
+
+
+def _repo_dirty(repo: Path) -> list[str]:
+    r = _git(repo, "status", "--porcelain", "-z")
     if r.returncode != 0:
         return []
     files = []
-    # split by null
     parts = r.stdout.split("\0")
     i = 0
     while i < len(parts):
         line = parts[i]
         i += 1
-        if not line.strip():
-            continue
         if len(line) < 3:
             continue
-        # porcelain -z: first two chars status, third space, then path; for rename there might be orig path followed by new path
         status = line[:2]
         path = line[3:]
-        if "R" in status or "C" in status and i < len(parts):
-            new_path = parts[i]
+        if ("R" in status or "C" in status) and i < len(parts):
             i += 1
-            path = new_path
-        skip = False
-        for ex in exclude:
-            if path.startswith(ex) or ex in path:
-                skip = True
-                break
-        if skip:
-            continue
         files.append(path)
     return files
 
 
+def dirty_files(root: Path, exclude: list[str] | None = None) -> list[str]:
+    exclude = exclude or [".orchestrator/"]
+    files = [_prefix(root, repo) + path for repo in repos(root) for path in _repo_dirty(repo)]
+    return [path for path in files if not any(path.startswith(ex) or ex in path for ex in exclude)]
+
+
 def branch_exists(cwd: Path, name: str) -> bool:
-    r = _run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"], cwd)
-    return r.returncode == 0
+    return _git(cwd, "show-ref", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0
 
 
-def ensure_branch(cwd: Path, name: str) -> str | None:
-    if branch_exists(cwd, name):
-        r = _run(["git", "checkout", name], cwd)
-        if r.returncode != 0:
-            raise GitError("git checkout failed", ["git", "checkout", name], r.stderr)
-        return head_sha(cwd)
-    r = _run(["git", "checkout", "-b", name], cwd)
-    if r.returncode != 0:
-        raise GitError("git checkout -b failed", ["git", "checkout", "-b", name], r.stderr)
-    return head_sha(cwd)
+def ensure_branch(root: Path, name: str) -> str | None:
+    found = repos(root) or [root]
+    for repo in found:
+        if branch_exists(repo, name):
+            _check(repo, "checkout", name)
+        else:
+            _check(repo, "checkout", "-b", name)
+    return head_sha(root)
 
 
-def commit_all(cwd: Path, message: str) -> str | None:
-    r = _run(["git", "add", "-A"], cwd)
-    if r.returncode != 0:
-        raise GitError("git add failed", ["git", "add", "-A"], r.stderr)
-    r2 = _run(["git", "diff", "--cached", "--quiet"], cwd)
-    if r2.returncode == 0:
-        return None
-    r3 = _run(["git", "commit", "-m", message], cwd)
-    if r3.returncode != 0:
-        raise GitError("git commit failed", ["git", "commit", "-m", message], r3.stderr)
-    return head_sha(cwd)
+def commit_all(root: Path, message: str) -> str | None:
+    committed = False
+    for repo in repos(root) or [root]:
+        _check(repo, "add", "-A")
+        if _git(repo, "diff", "--cached", "--quiet").returncode == 0:
+            continue
+        _check(repo, "commit", "-m", message)
+        committed = True
+    return head_sha(root) if committed else None
 
 
-def diff(cwd: Path, base: str) -> str:
-    if not base:
-        r = _run(["git", "diff"], cwd)
-    else:
-        r = _run(["git", "diff", base, "HEAD"], cwd)
-    return r.stdout
+def diff(root: Path, base: str) -> str:
+    bases = _split(root, base)
+    out = []
+    for repo in repos(root):
+        prefix = _prefix(root, repo)
+        args = ["diff", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}"]
+        if bases.get(repo):
+            args += [bases[repo], "HEAD"]
+        out.append(_git(repo, *args).stdout)
+    return "".join(out)
 
 
-def changed_files(cwd: Path, base: str) -> list[str]:
-    if not base:
-        return []
-    r = _run(["git", "diff", "--name-only", base, "HEAD"], cwd)
-    if r.returncode != 0:
-        return []
-    return [l for l in r.stdout.splitlines() if l.strip()]
-
-
-def push(cwd: Path, remote: str, branch: str) -> bool:
-    r = _run(["git", "push", "-u", remote, branch], cwd)
-    return r.returncode == 0
+def push(root: Path, remote: str, branch: str) -> bool:
+    branches = _split(root, branch)
+    results = [_git(repo, "push", "-u", remote, branches.get(repo, branch)).returncode == 0 for repo in repos(root)]
+    return bool(results) and all(results)

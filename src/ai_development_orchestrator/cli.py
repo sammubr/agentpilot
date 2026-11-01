@@ -13,7 +13,7 @@ import yaml
 from .backlog import add_features, find_cycle, load_backlog_file
 from .config import load_config
 from .engine import Engine, StartRefused
-from .gitops import is_repo
+from .gitops import repos
 from .models import FeatureStatus, HistoryEvent, RunStatus, utcnow
 from .report import format_status, status_data, write_report
 from .workspace import LockHeld, Workspace
@@ -89,7 +89,8 @@ def import_backlog(ctx: typer.Context, file: Annotated[Path, typer.Argument()]) 
 
 
 def _checks(ws: Workspace) -> list[tuple[str, bool, str]]:
-    checks = [("Git repository", is_repo(ws.repo), str(ws.repo))]
+    found = repos(ws.repo)
+    checks = [("Git repository", bool(found), ", ".join(str(path) for path in found) or f"none in {ws.repo}")]
     checks.append((".specify/", (ws.repo / ".specify").is_dir(), "present" if (ws.repo / ".specify").is_dir() else "missing"))
     skills = ["specify", "clarify", "plan", "tasks", "analyze", "converge"]
     missing = [name for name in skills if not (ws.repo / ".claude" / "skills" / f"speckit-{name}").is_dir()]
