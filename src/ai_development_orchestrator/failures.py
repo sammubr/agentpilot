@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .config import RetryConfig
 from .models import FailureKind
 
 USAGE_PATTERNS = (r"usage limit", r"rate limit", r"limit reached", r"hit your limit", r"\bquota\b", r"too many requests", r"credit balance", r"out of credits", r"\b429\b")
@@ -89,3 +91,24 @@ def _time_zone(name: str | None):
         return ZoneInfo(name) if name else UTC
     except (ZoneInfoNotFoundError, ValueError):
         return UTC
+
+
+@dataclass
+class Decision:
+    action: str
+    delay_s: float
+
+
+def decide(kind: FailureKind, attempt: int, reset_at: datetime | None, now: datetime, cfg: RetryConfig) -> Decision:
+    if kind == FailureKind.auth:
+        return Decision("pause", 0)
+    if kind == FailureKind.usage_limit:
+        if reset_at is not None:
+            delay = max((reset_at - now).total_seconds() + cfg.usage_limit_margin_s, 1)
+        else:
+            delay = cfg.usage_limit_initial_delay_s * cfg.multiplier ** max(0, attempt - 1)
+        return Decision("wait", float(min(delay, cfg.usage_limit_max_wait_s)))
+    limit = cfg.max_attempts_network if kind == FailureKind.network else cfg.max_attempts_execution
+    if attempt >= limit:
+        return Decision("fail", 0)
+    return Decision("wait", float(min(cfg.initial_delay_s * cfg.multiplier ** max(0, attempt - 1), cfg.max_delay_s)))

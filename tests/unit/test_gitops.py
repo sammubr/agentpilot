@@ -96,8 +96,6 @@ def test_nested_repos_without_root_git(tmp_path):
     assert gitops.commit_all(tmp_path, "msg") is not None
     assert gitops.dirty_files(tmp_path) == []
     assert gitops.head_sha(tmp_path) != base
-    assert "b/api/b.txt" in gitops.diff(tmp_path, base)
-    assert "web/" not in gitops.diff(tmp_path, base)
 
 
 def test_nested_repos_on_different_branches(tmp_path):

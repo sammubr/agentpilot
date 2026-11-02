@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -29,9 +30,11 @@ def target_repo(tmp_path):
         s = repo / ".claude" / "skills" / name
         s.mkdir(parents=True)
         (s / "SKILL.md").write_text("x")
+    commands = repo / ".opencode" / "commands"
+    commands.mkdir(parents=True)
+    (commands / "speckit.implement.md").write_text("x")
     (repo / "specs").mkdir(exist_ok=True)
-    # commit .specify/.gitignore and .claude/skills/* files
-    subprocess.run(["git", "add", ".specify", ".claude"], cwd=repo, check=True)
+    subprocess.run(["git", "add", ".specify", ".claude", ".opencode"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "add-specify"], cwd=repo, check=True)
     return repo
 
@@ -53,12 +56,6 @@ def workspace(target_repo):
     cfg = cfg.replace('usage_limit_initial_delay_s = 300', 'usage_limit_initial_delay_s = 0.01')
     cfg = cfg.replace('usage_limit_margin_s = 60', 'usage_limit_margin_s = 0')
     cfg = cfg.replace('max_delay_s = 1800', 'max_delay_s = 0.05')
-    # validation commands
-    if '[validation]' in cfg:
-        # replace commands line
-        cfg = cfg.replace('commands = []', 'commands = ["test ! -f BROKEN"]')
-    else:
-        cfg += '\n[validation]\ncommands = ["test ! -f BROKEN"]\n'
     cfg_path.write_text(cfg)
     return ws
 
@@ -76,21 +73,35 @@ def scenario(tmp_path):
 @pytest.fixture
 def calls():
     def _read(scenario_path):
-        calls_log = scenario_path + ".calls.jsonl"
-        res = []
-        if os.path.exists(calls_log):
-            with open(calls_log) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        res.append(json.loads(line))
-                    except Exception:
-                        pass
-        return res
+        log = Path(scenario_path + ".calls.jsonl")
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
 
     return _read
+
+
+@pytest.fixture
+def drive():
+    """Run an Engine in a thread; answer each pause with the next control ("resume" or "stop")."""
+
+    def _drive(engine, controls=("stop",), timeout=60, **kwargs):
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("status", engine.run(**kwargs)), daemon=True)
+        thread.start()
+        pending = list(controls)
+        deadline = time.monotonic() + timeout
+        while thread.is_alive() and time.monotonic() < deadline:
+            state = engine.ws.load_state() if engine.ws.state_path.exists() else None
+            if state and state.run.status == "paused" and pending and engine.ws.read_control() is None:
+                control = pending.pop(0)
+                engine.ws.request(control() if callable(control) else control)
+            time.sleep(0.05)
+        thread.join(1)
+        assert not thread.is_alive(), "engine did not finish"
+        return result["status"]
+
+    return _drive
 
 
 @pytest.fixture

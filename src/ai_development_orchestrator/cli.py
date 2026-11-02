@@ -10,13 +10,14 @@ from typing import Annotated
 import typer
 import yaml
 
-from .backlog import add_features, find_cycle, load_backlog_file
+from .backlog import add_features, load_backlog_file
 from .config import load_config
 from .engine import Engine, StartRefused
 from .gitops import repos
-from .models import FeatureStatus, HistoryEvent, RunStatus, utcnow
-from .report import format_status, status_data, write_report
+from .models import FeatureStatus, RunStatus, State
 from .workspace import LockHeld, Workspace
+
+SKILLS = ("specify", "clarify", "plan", "tasks", "analyze", "converge")
 
 app = typer.Typer(no_args_is_help=True, help="Autonomous AI development orchestrator")
 
@@ -92,30 +93,21 @@ def _checks(ws: Workspace) -> list[tuple[str, bool, str]]:
     found = repos(ws.repo)
     checks = [("Git repository", bool(found), ", ".join(str(path) for path in found) or f"none in {ws.repo}")]
     checks.append((".specify/", (ws.repo / ".specify").is_dir(), "present" if (ws.repo / ".specify").is_dir() else "missing"))
-    skills = ["specify", "clarify", "plan", "tasks", "analyze", "converge"]
-    missing = [name for name in skills if not (ws.repo / ".claude" / "skills" / f"speckit-{name}").is_dir()]
-    checks.append(("Spec Kit skills", not missing, "present" if not missing else "missing " + ", ".join(missing)))
-    cfg = None
+    missing = [f"speckit-{name}" for name in SKILLS if not (ws.repo / ".claude" / "skills" / f"speckit-{name}").is_dir()]
+    if not (ws.repo / ".opencode" / "commands" / "speckit.implement.md").is_file():
+        missing.append(".opencode/commands/speckit.implement.md")
+    checks.append(("Spec Kit commands", not missing, "present" if not missing else "missing " + ", ".join(missing)))
     try:
         cfg = load_config(ws.config_path)
         checks.append(("Config", True, "loaded"))
+        checks += [(f"{name} --version", *_version_check(cfg.agents[name].command)) for name in ("claude", "opencode")]
     except (OSError, ValueError) as error:
         checks.append(("Config", False, str(error)))
-    if cfg is not None:
-        for name in ("claude", "opencode"):
-            command = cfg.agents[name].command
-            ok, detail = _version_check(command)
-            checks.append((f"{name} --version", ok, detail))
     try:
         state = ws.load_state()
-        ids = [feature.id for feature in state.features]
-        known = set(ids)
-        unknown = sorted({dep.id for feature in state.features for dep in feature.dependencies if dep.id not in known})
-        cycle = find_cycle(state)
-        valid = len(ids) == len(known) and not unknown and not cycle
-        detail = "valid" if valid else f"duplicate ids={len(ids) - len(known)}, unknown dependencies={unknown}, cycle={cycle}"
-        checks.append(("Backlog", valid, detail))
-    except (OSError, ValueError) as error:
+        add_features(State(), [{**f.model_dump(), "depends_on": f.depends_on} for f in state.features])
+        checks.append(("Backlog", True, "valid"))
+    except (OSError, ValueError, KeyError) as error:
         checks.append(("Backlog", False, str(error)))
     return checks
 
@@ -141,48 +133,64 @@ def check(ctx: typer.Context) -> None:
         raise typer.Exit(1)
 
 
-def _run(ws: Workspace, max_features: int | None, resume: bool) -> None:
-    checks = _checks(ws)
-    failures = [f"{name}: {detail}" for name, ok, detail in checks if not ok]
+def _run(ws: Workspace, max_features: int | None, run_id: str | None = None) -> None:
+    failures = [f"{name}: {detail}" for name, ok, detail in _checks(ws) if not ok]
     if failures:
         _error("environment check failed: " + "; ".join(failures))
-    if resume:
-        ws.clear_control()
-        state = ws.load_state()
-        if state.run.status in (RunStatus.paused, RunStatus.stopped):
-            state.run.status_reason = None
-            ws.save_state(state)
+    if ws.is_locked():
+        _error("another orchestrator is running", 3)
+    ws.clear_control()
     try:
-        status = Engine(ws, _config(ws)).run(max_features=max_features)
+        status = Engine(ws, _config(ws)).run(max_features=max_features, run_id=run_id)
     except LockHeld:
         _error("another orchestrator is running", 3)
     except (StartRefused, OSError, ValueError) as error:
         _error(str(error))
+    reason = ws.load_state().run.reason
+    typer.echo(f"Run {status.value}" + (f": {reason}" if reason else ""))
+
+
+MaxFeatures = Annotated[int | None, typer.Option("--max-features", min=1)]
+
+
+@app.command()
+def run(ctx: typer.Context, max_features: MaxFeatures = None) -> None:
+    """Start a run session."""
+    _run(_workspace(ctx), max_features)
+
+
+@app.command(name="continue")
+def continue_run(ctx: typer.Context, max_features: MaxFeatures = None) -> None:
+    """Start a new run session from the preserved progress."""
+    _run(_workspace(ctx), max_features)
+
+
+@app.command()
+def resume(ctx: typer.Context) -> None:
+    """Resume a paused run."""
+    ws = _workspace(ctx)
+    if ws.is_locked():
+        ws.request("resume")
+        typer.echo("Resume requested")
+        return
     state = ws.load_state()
-    typer.echo(f"Run {status.value}" + (f": {state.run.status_reason}" if state.run.status_reason else ""))
-    if status == RunStatus.halted:
-        raise typer.Exit(1)
-
-
-@app.command()
-def run(ctx: typer.Context, max_features: Annotated[int | None, typer.Option("--max-features", min=1)] = None) -> None:
-    _run(_workspace(ctx), max_features, resume=False)
-
-
-@app.command()
-def resume(ctx: typer.Context, max_features: Annotated[int | None, typer.Option("--max-features", min=1)] = None) -> None:
-    _run(_workspace(ctx), max_features, resume=True)
+    if state.run.status == RunStatus.stopped:
+        _error("run was stopped; use continue")
+    if state.run.status != RunStatus.paused:
+        _error(f"no paused run (status: {state.run.status.value}); use continue")
+    _run(ws, None, state.run.id)
 
 
 @app.command()
 def pause(ctx: typer.Context) -> None:
-    ws = _workspace(ctx)
-    ws.request("pause")
+    """Pause the active run after the current agent call."""
+    _workspace(ctx).request("pause")
     typer.echo("Pause requested")
 
 
 @app.command()
 def stop(ctx: typer.Context) -> None:
+    """Stop the run, terminating the current agent call; progress is kept."""
     ws = _workspace(ctx)
     ws.request("stop")
     pid = ws.lock_holder_pid()
@@ -198,59 +206,55 @@ def stop(ctx: typer.Context) -> None:
         _error(f"could not signal process {pid}: {error}")
 
 
+def _status_data(ws: Workspace, state: State) -> dict:
+    run = state.run.model_dump(mode="json")
+    features = [
+        f.model_dump(mode="json", include={"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error", "depends_on"})
+        for f in state.features
+    ]
+    unavailable = {agent.value: until.isoformat() for agent, until in state.unavailable.items()}
+    return {"run": run, "running": ws.is_locked(), "unavailable": unavailable, "features": features}
+
+
+def _format_status(data: dict) -> str:
+    run = data["run"]
+    lines = [
+        f'Run {run["id"] or "-"}: {run["status"]}' + (f' ({run["reason"]})' if run["reason"] else "")
+        + f' — process: {"running" if data["running"] else "none"}',
+        f'Current: {run["feature"] or "-"}   Stage: {run["stage"] or "-"}   Agent: {run["agent"] or "-"}',
+    ]
+    lines += [f"Unavailable: {agent} until {until}" for agent, until in data["unavailable"].items()]
+    for f in data["features"]:
+        stage = f["done"][-1] if f["done"] else "-"
+        error = f'   error: {f["last_error"]}' if f["last_error"] else ""
+        deps = f' (depends on {", ".join(f["depends_on"])})' if f["depends_on"] else ""
+        lines.append(f'  {f["id"]}{deps}: {f["status"]}   last stage: {stage}   round: {f["round"]}   attempts: {f["attempts"]}{error}')
+    return "\n".join(lines)
+
+
 @app.command()
 def status(ctx: typer.Context, json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     ws = _workspace(ctx)
     try:
-        data = status_data(ws, ws.load_state(), utcnow())
+        data = _status_data(ws, ws.load_state())
     except (OSError, ValueError) as error:
         _error(str(error))
-    typer.echo(json.dumps(data, indent=2) if json_output else format_status(data))
+    typer.echo(json.dumps(data, indent=2) if json_output else _format_status(data))
 
 
 @app.command()
-def retry(
-    ctx: typer.Context,
-    id: Annotated[str, typer.Argument()],
-    from_step: Annotated[str | None, typer.Option("--from")] = None,
-) -> None:
+def retry(ctx: typer.Context, id: Annotated[str, typer.Argument()]) -> None:
+    """Requeue a blocked feature; its stage is re-derived from the Spec Kit artifacts."""
     ws = _workspace(ctx)
     _locked(ws)
     state = ws.load_state()
     feature = next((item for item in state.features if item.id == id), None)
     if feature is None:
         _error(f"unknown feature: {id}")
-    if feature.status not in (FeatureStatus.blocked, FeatureStatus.failed):
-        _error(f"feature {id} is not blocked or failed")
-    if from_step is not None:
-        failed_active_step = state.run.current_feature == id and state.run.active_step == from_step
-        if from_step not in feature.completed_steps and not failed_active_step:
-            _error(f"step not completed: {from_step}")
-        if from_step in feature.completed_steps:
-            index = feature.completed_steps.index(from_step)
-            feature.completed_steps = feature.completed_steps[:index]
-    else:
-        feature.completed_steps = [step for step in feature.completed_steps if not step.startswith(("converge.", "correct."))]
-        feature.correction_round = 0
-    feature.attempts = {}
-    feature.block_reason = None
-    feature.finished_at = None
+    if feature.status != FeatureStatus.blocked:
+        _error(f"feature {id} is not blocked")
     feature.status = FeatureStatus.pending
-    if state.run.pending_recovery and state.run.pending_recovery.feature_id == id:
-        state.run.pending_recovery = None
-    feature.history.append(HistoryEvent(at=utcnow(), step=from_step, event="retry_requested", detail="from " + from_step if from_step else "default"))
+    feature.attempts, feature.round, feature.session_id, feature.last_error = 0, 0, None, None
     ws.save_state(state)
-    ws.log_event("retry_requested", feature=id, step=from_step)
+    ws.log_event("retry_requested", feature=id)
     typer.echo(f"Retry queued for {id}")
-
-
-@app.command()
-def report(ctx: typer.Context, output: Annotated[Path | None, typer.Option("--output")] = None) -> None:
-    ws = _workspace(ctx)
-    state = ws.load_state()
-    destination = output if output is None or output.is_absolute() else ws.repo / output
-    try:
-        written = write_report(ws, state, destination)
-    except OSError as error:
-        _error(str(error))
-    typer.echo(str(written))

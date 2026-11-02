@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from .config import Config
 from .failures import classify, parse_reset_time
@@ -92,14 +91,7 @@ def build_opencode_argv(cfg: Config, prompt: str, session_id: str | None = None)
 
 
 def opencode_env(cfg: Config) -> dict[str, str]:
-    perm = cfg.agents["opencode"].permission
-    if hasattr(perm, "model_dump"):
-        perm_dict = perm.model_dump()
-    elif isinstance(perm, dict):
-        perm_dict = perm
-    else:
-        perm_dict = {"bash": {}}
-    return {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": perm_dict})}
+    return {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": cfg.agents["opencode"].permission})}
 
 
 def parse_opencode(proc: ProcessResult) -> AgentResult:
@@ -157,25 +149,26 @@ def _opencode_failure(message: str, combined: str, proc: ProcessResult, session_
     return AgentResult(ok=False, failure=kind, message=message[:2000], session_id=session_id, reset_at=reset_at, process=proc)
 
 
+def agent_env(agent: AgentName, cfg: Config, spec_dir: str | None) -> dict[str, str]:
+    env = opencode_env(cfg) if agent == AgentName.opencode else {}
+    if spec_dir:
+        env["SPECIFY_FEATURE_DIRECTORY"] = spec_dir
+    return env
+
+
 def run_agent(
     agent: AgentName,
     cfg: Config,
-    prompt: str,
-    workspace: Any,
-    run_dir: Path,
+    message: str,
+    repo: Path,
+    spec_dir: str | None = None,
     session_id: str | None = None,
-    should_stop: Any = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> AgentResult:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "prompt.txt").write_text(prompt)
     if agent == AgentName.claude:
-        argv = build_claude_argv(cfg, prompt, session_id)
-        proc = run_process(argv, cwd=workspace.repo, env=os.environ.copy(), timeout_s=cfg.agents["claude"].timeout_s, run_dir=run_dir, should_stop=should_stop)
-        return parse_claude(proc)
-    elif agent == AgentName.opencode:
-        argv = build_opencode_argv(cfg, prompt, session_id)
-        env = opencode_env(cfg)
-        proc = run_process(argv, cwd=workspace.repo, env=env, timeout_s=cfg.agents["opencode"].timeout_s, run_dir=run_dir, should_stop=should_stop)
-        return parse_opencode(proc)
+        argv, parse = build_claude_argv(cfg, message, session_id), parse_claude
     else:
-        raise ValueError("unknown agent")
+        argv, parse = build_opencode_argv(cfg, message, session_id), parse_opencode
+    env = agent_env(agent, cfg, spec_dir)
+    timeout = cfg.agents[agent.value].timeout_s
+    return parse(run_process(argv, cwd=repo, env=env, timeout_s=timeout, should_stop=should_stop))
