@@ -230,6 +230,8 @@ class Engine:
         return self._converge(current)
 
     def _start_feature(self, feature: Feature) -> Outcome | None:
+        if self.state is not None and self.state.run.active_step is None:
+            self.state.run.last_checkpoint = gitops.head_sha(self.ws.repo)
         select = Step("select", "Select", AgentName.claude, commit=False)
         outcome = self._execute(feature, select)
         if outcome != Outcome.ok:

@@ -82,3 +82,20 @@ def test_select_adds_dependency_and_processes_declared_feature_first(target_repo
     assert order == ["F1", "F3", "F2"]
     events = [line for line in workspace.events_path.read_text().splitlines() if '"dependency_added"' in line]
     assert any('"rationale": "fake"' in line and '"added_by": "claude"' in line for line in events)
+
+
+def test_new_import_after_finished_run_ignores_stale_checkpoint(target_repo, workspace, scenario, tmp_path):
+    os.environ["FAKE_AGENT_SCENARIO"] = scenario({"claude": {}, "opencode": {}})
+    state = workspace.load_state()
+    add_features(state, [{"id": "F1", "title": "First", "description": "first"}])
+    workspace.save_state(state)
+    Engine(workspace, load_config(workspace.config_path), sleep=lambda _: None, handle_signals=False).run()
+    subprocess.run(["git", "checkout", "-q", "-"], cwd=workspace.repo, check=True)
+    subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "merge", "orchestrator/F1"], cwd=workspace.repo, check=True)
+    state = workspace.load_state()
+    add_features(state, [{"id": "F2", "title": "Second", "description": "second"}])
+    workspace.save_state(state)
+    result = Engine(workspace, load_config(workspace.config_path), sleep=lambda _: None, handle_signals=False).run()
+    state = workspace.load_state()
+    assert result == RunStatus.finished
+    assert state.features[1].status == FeatureStatus.completed
