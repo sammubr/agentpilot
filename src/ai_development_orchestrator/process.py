@@ -36,16 +36,12 @@ def run_process(
     cwd: Path | str | None = None,
     env: dict[str, str] | None = None,
     timeout_s: int | None = None,
-    run_dir: Path | None = None,
     should_stop: Callable[[], bool] | None = None,
     grace_s: int = 10,
 ) -> ProcessResult:
     start = time.monotonic()
-    tempdir = tempfile.TemporaryDirectory(prefix="ai_dev_orch_") if run_dir is None else None
-    output_dir = run_dir or Path(tempdir.name)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path, stderr_path = output_dir / "stdout.txt", output_dir / "stderr.txt"
-    try:
+    with tempfile.TemporaryDirectory(prefix="agentpilot_") as tempdir:
+        stdout_path, stderr_path = Path(tempdir) / "stdout.txt", Path(tempdir) / "stderr.txt"
         proc = _launch(argv, cwd, env, stdout_path, stderr_path)
         if isinstance(proc, ProcessResult):
             return proc.model_copy(update={"duration_s": time.monotonic() - start})
@@ -58,9 +54,6 @@ def run_process(
             stderr=_read_output(stderr_path),
             duration_s=time.monotonic() - start,
         )
-    finally:
-        if tempdir is not None:
-            tempdir.cleanup()
 
 
 def _launch(argv: list[str], cwd: Path | str | None, env: dict[str, str] | None, stdout: Path, stderr: Path):

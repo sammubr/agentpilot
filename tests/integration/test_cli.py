@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from typer.testing import CliRunner
 
-from ai_development_orchestrator import gitops
 from ai_development_orchestrator.cli import app
-from ai_development_orchestrator.models import Feature, FeatureStatus
+from ai_development_orchestrator.models import Feature, FeatureStatus, Stage
 
 runner = CliRunner()
 
@@ -17,107 +15,72 @@ def invoke(workspace, *args: str, env: dict | None = None):
 
 
 def test_cli_lifecycle_and_status(workspace, scenario):
-    result = invoke(workspace, "add", "F1", "First", "--description", "Feature one")
-    assert result.exit_code == 0, result.output
+    assert invoke(workspace, "add", "F1", "First", "--description", "Feature one").exit_code == 0
     backlog = workspace.orch / "backlog.yaml"
     backlog.write_text("features:\n  - id: F2\n    title: Second\n    description: Feature two\n    depends_on: [F1]\n")
-    result = invoke(workspace, "import", str(backlog))
+    assert invoke(workspace, "import", str(backlog)).exit_code == 0
+    check = invoke(workspace, "check")
+    assert check.exit_code == 0, check.output
+
+    result = invoke(workspace, "run", env={"FAKE_AGENT_SCENARIO": scenario({})})
+
     assert result.exit_code == 0, result.output
-    result = invoke(workspace, "check")
-    assert result.exit_code == 0, result.output
-    scenario_path = scenario({})
-    result = invoke(workspace, "run", env={"FAKE_AGENT_SCENARIO": scenario_path})
-    assert result.exit_code == 0, result.output
-    state = workspace.load_state()
-    assert [feature.status for feature in state.features] == [FeatureStatus.completed] * 2
+    assert "Run finished" in result.output
+    assert [f.status for f in workspace.load_state().features] == [FeatureStatus.completed] * 2
     text = invoke(workspace, "status")
-    assert text.exit_code == 0 and "Run: finished" in text.output
-    structured = invoke(workspace, "status", "--json")
-    data = json.loads(structured.output)
-    assert data["current_feature"] is None
-    assert data["current_step"] is None
-    assert set(data) == {
-        "run_status", "status_reason", "running", "backlog_position", "backlog_total",
-        "current_feature", "current_feature_title", "current_phase", "current_step",
-        "current_agent", "run_elapsed_s", "feature_elapsed_s", "step_attempts", "last_error",
-        "next_retry_at", "completed", "blocked", "failed", "pending",
-    }
-    report = invoke(workspace, "report")
-    assert report.exit_code == 0
-    assert "F1: First" in workspace.report_path.read_text()
-    assert "F2: Second" in workspace.report_path.read_text()
-    events = [json.loads(line) for line in workspace.events_path.read_text().splitlines()]
-    assert {"agent_started", "feature_started", "run_ended"}.issubset({item["event"] for item in events})
+    assert text.exit_code == 0 and ": finished" in text.output and "F2 (depends on F1): completed" in text.output
+    data = json.loads(invoke(workspace, "status", "--json").output)
+    assert set(data) == {"run", "running", "unavailable", "features"}
+    assert data["run"]["status"] == "finished" and data["running"] is False
+    assert set(data["features"][0]) == {"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error", "depends_on"}
+    events = {json.loads(line)["event"] for line in workspace.events_path.read_text().splitlines()}
+    assert {"run_started", "stage_started", "agent_finished", "stage_completed", "feature_completed", "run_ended"} <= events
 
 
-def test_cli_init_refuses_existing_config(target_repo):
+def test_init_creates_only_owned_files(target_repo):
     args = ["--repo", str(target_repo), "init"]
-    first = runner.invoke(app, args)
-    second = runner.invoke(app, args)
-    assert first.exit_code == 0
-    assert second.exit_code == 1
+    assert runner.invoke(app, args).exit_code == 0
+    assert runner.invoke(app, args).exit_code == 1
+    orch = target_repo / ".orchestrator"
+    files = sorted(p.relative_to(orch).as_posix() for p in orch.rglob("*") if p.is_file())
+    assert files == [".gitignore", "config.toml", "logs/events.jsonl", "state.json"]
 
 
-def test_retry_default_and_from(workspace):
+def test_removed_commands_are_usage_errors(workspace):
+    assert invoke(workspace, "report").exit_code == 2
+    assert invoke(workspace, "retry", "F1", "--from", "plan").exit_code == 2
+
+
+def test_retry_requeues_blocked_feature(workspace):
     state = workspace.load_state()
     state.features.append(Feature(
-        id="F1", title="Feature", description="retry", status=FeatureStatus.blocked,
-        completed_steps=["specify", "clarify", "plan", "tasks", "converge.0", "correct.handoff.1"],
-        attempts={"plan": 2}, correction_round=1, block_reason="review",
+        id="F1", title="Feature", description="retry", status=FeatureStatus.blocked, done=[Stage.specify],
+        attempts=2, round=3, session_id="s", last_error="open tasks remain",
     ))
+    state.features.append(Feature(id="F2", title="Feature", description="pending"))
     workspace.save_state(state)
-    result = invoke(workspace, "retry", "F1")
-    assert result.exit_code == 0, result.output
+
+    assert invoke(workspace, "retry", "F1").exit_code == 0
     feature = workspace.load_state().features[0]
-    assert feature.completed_steps == ["specify", "clarify", "plan", "tasks"]
-    assert feature.correction_round == 0 and feature.attempts == {}
-    feature.status = FeatureStatus.failed
-    feature.completed_steps = ["specify", "clarify", "plan", "tasks"]
-    workspace.save_state(workspace.load_state().model_copy(update={"features": [feature]}))
-    result = invoke(workspace, "retry", "F1", "--from", "plan")
-    assert result.exit_code == 0, result.output
-    assert workspace.load_state().features[0].completed_steps == ["specify", "clarify"]
+    assert feature.status == FeatureStatus.pending
+    assert (feature.attempts, feature.round, feature.session_id, feature.last_error) == (0, 0, None, None)
+    assert feature.done == [Stage.specify]
+    assert invoke(workspace, "retry", "F2").exit_code == 1
+    assert invoke(workspace, "retry", "nope").exit_code == 1
 
 
-@pytest.mark.parametrize("retry_from", [False, True])
-def test_retry_failed_active_step_preserves_partial_output(workspace, scenario, retry_from):
-    state = workspace.load_state()
-    state.features.append(Feature(id="F1", title="Feature", description="retry partial output"))
-    workspace.save_state(state)
-    failed_scenario = scenario({"claude": {"implement.handoff": "bad_handoff"}})
-
-    result = invoke(workspace, "run", env={"FAKE_AGENT_SCENARIO": failed_scenario})
-    assert result.exit_code == 1, result.output
-    state = workspace.load_state()
-    feature = state.features[0]
-    assert feature.status == FeatureStatus.failed
-    assert state.run.active_step == "implement.handoff"
-    assert state.run.current_step == "implement.handoff"
-    assert feature.spec_dir
-    handoff = workspace.repo / feature.spec_dir / "orchestrator" / "handoff-implement.md"
-    assert handoff.exists()
-    assert "## Restrictions" not in handoff.read_text()
-    assert handoff.relative_to(workspace.repo).as_posix() in gitops.dirty_files(workspace.repo)
-
-    retry_args = ["retry", "F1"]
-    if retry_from:
-        retry_args.extend(["--from", "implement.handoff"])
-    result = invoke(workspace, *retry_args)
-    assert result.exit_code == 0, result.output
-
-    successful_scenario = scenario({})
-    result = invoke(workspace, "resume", env={"FAKE_AGENT_SCENARIO": successful_scenario})
-    assert result.exit_code == 0, result.output
-    assert workspace.load_state().features[0].status == FeatureStatus.completed
+def test_check_reports_missing_opencode_command(workspace):
+    (workspace.repo / ".opencode" / "commands" / "speckit.implement.md").unlink()
+    result = invoke(workspace, "check")
+    assert result.exit_code == 1
+    assert "speckit.implement.md" in result.output
 
 
 def test_pause_and_lock_exit_code(workspace):
-    result = invoke(workspace, "pause")
-    assert result.exit_code == 0
+    assert invoke(workspace, "pause").exit_code == 0
     assert workspace.read_control() == "pause"
     workspace.acquire_lock()
     try:
-        result = invoke(workspace, "add", "F1", "Feature", "--description", "locked")
-        assert result.exit_code == 3
+        assert invoke(workspace, "add", "F1", "Feature", "--description", "locked").exit_code == 3
     finally:
         workspace.release_lock()

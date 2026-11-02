@@ -6,7 +6,7 @@ Description=AgentPilot development orchestrator
 [Service]
 Type=simple
 WorkingDirectory=%h/<repo>
-ExecStart=%h/.local/bin/agentpilot resume
+ExecStart=%h/.local/bin/agentpilot continue
 Restart=on-failure
 RestartSec=60
 

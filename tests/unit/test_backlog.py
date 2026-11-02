@@ -51,3 +51,26 @@ def test_next_selection():
     n.status = __import__('ai_development_orchestrator.models', fromlist=['FeatureStatus']).FeatureStatus.completed
     n2 = backlog.next_feature(s)
     assert n2.id == "F2"
+
+
+def test_next_skips_feature_with_blocked_dependency():
+    from ai_development_orchestrator.models import FeatureStatus
+
+    s = State()
+    backlog.add_features(s, [
+        {"id": "A", "title": "T", "description": "D"},
+        {"id": "B", "title": "T", "description": "D", "depends_on": ["A"]},
+        {"id": "C", "title": "T", "description": "D"},
+    ])
+    s.features[0].status = FeatureStatus.blocked
+    assert backlog.next_feature(s).id == "C"
+    assert backlog.waiting_on(s.features[1], s) == ["A"]
+
+
+def test_failed_import_leaves_state_unchanged():
+    s = State()
+    try:
+        backlog.add_features(s, [{"id": "F1", "title": "T", "description": "D", "depends_on": ["X"]}])
+    except ValueError as error:
+        assert "X" in str(error)
+    assert s.features == []

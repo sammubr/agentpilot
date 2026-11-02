@@ -43,42 +43,63 @@ def test_dirty_start_refuses_without_modifying_file_branch_or_state(workspace, d
     assert workspace.state_path.read_bytes() == before_state
 
 
-def test_paused_run_reports_unexpected_file_and_head_move(workspace, scenario, monkeypatch):
+def _paused_reasons(workspace) -> list[str]:
+    events = [json.loads(line) for line in workspace.events_path.read_text().splitlines()]
+    return [event["reason"] for event in events if event["event"] == "paused"]
+
+
+def test_stray_file_between_stages_pauses(workspace, scenario, monkeypatch, drive):
     _add_feature(workspace)
-    path = scenario({"claude": {"plan": "request_pause"}, "opencode": {}})
-    monkeypatch.setenv("FAKE_AGENT_SCENARIO", path)
-    config = load_config(workspace.config_path)
-
-    assert Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run() == RunStatus.paused
-    assert "plan" in workspace.load_state().features[0].completed_steps
-
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", scenario({"claude": {"plan": "request_pause"}}))
+    engine = Engine(workspace, load_config(workspace.config_path), sleep=lambda _: None, handle_signals=False)
     stray = workspace.repo / "stray.txt"
-    stray.write_text("unexpected\n")
-    assert Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run() == RunStatus.paused
-    state = workspace.load_state()
-    assert "unexpected_changes" in state.run.status_reason
-    assert "stray.txt" in state.run.status_reason
 
-    stray.unlink()
-    (workspace.repo / "README.md").write_text("new committed revision\n")
-    _git(workspace.repo, "add", "README.md")
-    _git(workspace.repo, "commit", "-m", "external change")
-    assert Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run() == RunStatus.paused
-    assert "HEAD moved" in workspace.load_state().run.status_reason
+    def pause_hook():
+        if not stray.exists():
+            stray.write_text("unexpected\n")
+            return "resume"
+        stray.unlink()
+        return "resume"
+
+    assert drive(engine, controls=(pause_hook, pause_hook)) == RunStatus.finished
+    reasons = _paused_reasons(workspace)
+    assert reasons[0] == "pause requested"
+    assert "unexpected_changes: stray.txt" in reasons[1]
+    assert workspace.load_state().features[0].status == FeatureStatus.completed
 
 
-def test_branch_switch_during_clarify_fails_verification(workspace, scenario, monkeypatch):
+@pytest.mark.parametrize("behavior, reason", [("commit", "HEAD moved during stage"), ("switch_branch", "branch changed")])
+def test_agent_git_mutation_pauses(workspace, scenario, monkeypatch, drive, behavior, reason):
     _add_feature(workspace)
-    path = scenario({"claude": {"clarify": "switch_branch"}, "opencode": {}})
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", scenario({"claude": {"clarify": behavior}}))
+    engine = Engine(workspace, load_config(workspace.config_path), sleep=lambda _: None, handle_signals=False)
+
+    assert drive(engine, controls=("stop",)) == RunStatus.stopped
+
+    assert reason in _paused_reasons(workspace)[0]
+    state = workspace.load_state()
+    assert "clarify" not in state.features[0].done
+
+
+def test_continue_switches_back_to_feature_branch(workspace, scenario, calls, monkeypatch):
+    _add_feature(workspace)
+    path = scenario({"claude": {"plan": ["hang"]}})
     monkeypatch.setenv("FAKE_AGENT_SCENARIO", path)
     config = load_config(workspace.config_path)
+    config.agents["claude"].timeout_s = 1
     config.retry.max_attempts_execution = 1
-
-    assert Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run() == RunStatus.halted
-
+    Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run()
     state = workspace.load_state()
-    assert state.features[0].status == FeatureStatus.failed
-    assert "branch changed" in state.features[0].block_reason
+    state.features[0].status = FeatureStatus.pending
+    workspace.save_state(state)
+    fresh = load_config(workspace.config_path)
+    _git(workspace.repo, "checkout", "-q", "-")
+    assert gitops.current_branch(workspace.repo) != "orchestrator/F1"
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", scenario({}))
+
+    assert Engine(workspace, fresh, sleep=lambda _: None, handle_signals=False).run() == RunStatus.finished
+    assert gitops.current_branch(workspace.repo) == "orchestrator/F1"
+    assert workspace.load_state().features[0].status == FeatureStatus.completed
 
 
 def test_default_permissions_are_logged_and_no_push_is_attempted(workspace, scenario, calls, monkeypatch):

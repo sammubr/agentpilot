@@ -37,7 +37,8 @@ def test_build_config_defaults_equal(tmp_path):
     c1 = build_config({})
     c2 = build_config(tomllib.loads(DEFAULT_CONFIG_TOML))
     assert c1.retry.initial_delay_s == c2.retry.initial_delay_s
-    assert c1.validation.commands == c2.validation.commands
+    assert c1.agents["claude"].allowed_tools == c2.agents["claude"].allowed_tools
+    assert c1.agents["opencode"].permission == c2.agents["opencode"].permission
 
 
 def test_config_permission_dict_passthrough(tmp_path):
@@ -58,4 +59,23 @@ def test_retry_floats_validation(tmp_path):
     data["retry"]["initial_delay_s"] = 0.01
     data["retry"]["usage_limit_margin_s"] = 0
     c = config.build_config(data)
-    config.validate_config(c, data)
+    config.validate_config(c)
+
+
+def test_removed_sections_rejected(tmp_path):
+    import pytest
+
+    p = tmp_path / "config.toml"
+    for section in ("[validation]\ncommands = []\n", "[[phases]]\nid = \"x\"\nprompt = \"y\"\n"):
+        p.write_text(DEFAULT_CONFIG_TOML + section)
+        with pytest.raises(ValueError, match="validation|phases"):
+            load_config(p)
+
+
+def test_unknown_key_rejected(tmp_path):
+    import pytest
+
+    p = tmp_path / "config.toml"
+    p.write_text(DEFAULT_CONFIG_TOML.replace("push = false", "push = false\nbogus = 1"))
+    with pytest.raises(ValueError, match="bogus"):
+        load_config(p)

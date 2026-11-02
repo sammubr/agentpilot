@@ -127,3 +127,17 @@ def test_parse_opencode_exit0_no_events():
     res = parse_opencode(proc)
     assert not res.ok
     assert res.failure == FailureKind.invalid_output
+
+
+def test_agent_env_sets_spec_dir():
+    from ai_development_orchestrator.agents import agent_env
+    from ai_development_orchestrator.config import build_config
+    from ai_development_orchestrator.models import AgentName
+
+    cfg = build_config({})
+    claude = agent_env(AgentName.claude, cfg, "specs/001-x")
+    opencode = agent_env(AgentName.opencode, cfg, "specs/001-x")
+    assert claude == {"SPECIFY_FEATURE_DIRECTORY": "specs/001-x"}
+    assert opencode["SPECIFY_FEATURE_DIRECTORY"] == "specs/001-x"
+    assert "OPENCODE_CONFIG_CONTENT" in opencode
+    assert agent_env(AgentName.claude, cfg, None) == {}

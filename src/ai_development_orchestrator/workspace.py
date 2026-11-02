@@ -3,7 +3,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +22,13 @@ class Workspace:
         self.state_path = self.orch / "state.json"
         self.lock_path = self.orch / "lock"
         self.control_path = self.orch / "control"
-        self.report_path = self.orch / "report.md"
         self.logs_dir = self.orch / "logs"
         self.events_path = self.logs_dir / "events.jsonl"
-        self.runs_dir = self.orch / "runs"
         self._lock_fd: int | None = None
 
     def ensure_dirs(self) -> None:
         self.orch.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
 
     def atomic_write_text(self, path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,12 +59,10 @@ class Workspace:
     def load_state(self) -> State:
         if not self.state_path.exists():
             return State()
-        data = json.loads(self.state_path.read_text())
-        return State.model_validate(data)
+        return State.model_validate(json.loads(self.state_path.read_text()))
 
     def save_state(self, state: State) -> None:
-        data = state.model_dump(mode="json")
-        self.atomic_write_json(self.state_path, data)
+        self.atomic_write_json(self.state_path, state.model_dump(mode="json"))
 
     def init(self, force: bool = False) -> None:
         self.ensure_dirs()
@@ -176,10 +170,3 @@ class Workspace:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
-
-    def new_run_dir(self, feature: str, step: str, attempt: int) -> Path:
-
-        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        d = self.runs_dir / f"{ts}-{feature}-{step}-a{attempt}"
-        d.mkdir(parents=True, exist_ok=True)
-        return d

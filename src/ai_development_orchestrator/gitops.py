@@ -128,18 +128,6 @@ def commit_all(root: Path, message: str) -> str | None:
     return head_sha(root) if committed else None
 
 
-def diff(root: Path, base: str) -> str:
-    bases = _split(root, base)
-    out = []
-    for repo in repos(root):
-        prefix = _prefix(root, repo)
-        args = ["diff", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}"]
-        if bases.get(repo):
-            args += [bases[repo], "HEAD"]
-        out.append(_git(repo, *args).stdout)
-    return "".join(out)
-
-
 def push(root: Path, remote: str, branch: str) -> bool:
     branches = _split(root, branch)
     results = [_git(repo, "push", "-u", remote, branches.get(repo, branch)).returncode == 0 for repo in repos(root)]

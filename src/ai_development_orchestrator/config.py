@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_CONFIG_TOML = """[agents.claude]
 command = ["claude"]
@@ -51,10 +50,6 @@ resume_sessions = true
 [convergence]
 max_corrections = 3
 
-[validation]
-commands = []
-timeout_s = 1800
-
 [git]
 allow_dirty_start = false
 branch_per_feature = true
@@ -66,87 +61,34 @@ remote = "origin"
 allow_unrestricted = false
 """
 
-
-DEFAULT_OPENCODE_PERMISSION = {
-    "edit": "allow",
-    "webfetch": "deny",
-    "external_directory": "deny",
-    "bash": {
-        "*": "allow",
-        "rm -rf *": "deny",
-        "rm -r *": "deny",
-        "rm -fr *": "deny",
-        "sudo *": "deny",
-        "git push*": "deny",
-        "git commit*": "deny",
-        "git reset*": "deny",
-        "git checkout*": "deny",
-        "git switch*": "deny",
-        "git clean*": "deny",
-        "git rebase*": "deny",
-        "git merge*": "deny",
-        "git branch -D*": "deny",
-        "git tag*": "deny",
-        "npm publish*": "deny",
-        "uv publish*": "deny",
-        "twine *": "deny",
-        "docker push*": "deny",
-        "kubectl *": "deny",
-        "helm *": "deny",
-        "terraform *": "deny",
-        "ssh *": "deny",
-        "scp *": "deny",
-        "chown *": "deny",
-        "mkfs*": "deny",
-        "dd *": "deny",
-    },
-}
+_DEFAULTS = tomllib.loads(DEFAULT_CONFIG_TOML)
+DEFAULT_OPENCODE_PERMISSION: dict[str, Any] = _DEFAULTS["agents"]["opencode"]["permission"]
+_CLAUDE = _DEFAULTS["agents"]["claude"]
 
 
-class ClaudeConfig(BaseModel):
+class Section(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ClaudeConfig(Section):
     command: list[str] = ["claude"]
     model: str = ""
     timeout_s: int = 3600
     permission_mode: str = "dontAsk"
-    allowed_tools: list[str] = [
-        "Read",
-        "Glob",
-        "Grep",
-        "Skill",
-        "TodoWrite",
-        "Write(specs/**)",
-        "Edit(specs/**)",
-        "Write(.specify/feature.json)",
-        "Edit(.specify/feature.json)",
-        "Bash(.specify/scripts/bash/*)",
-        "Bash(git status*)",
-        "Bash(git diff*)",
-        "Bash(git log*)",
-        "Bash(git show*)",
-    ]
-    disallowed_tools: list[str] = [
-        "Bash(git push*)",
-        "Bash(git commit*)",
-        "Bash(git reset*)",
-        "Bash(git checkout*)",
-        "Bash(git clean*)",
-        "Bash(git switch*)",
-        "Bash(git branch*)",
-        "Bash(rm *)",
-        "Bash(sudo *)",
-    ]
+    allowed_tools: list[str] = Field(default_factory=lambda: list(_CLAUDE["allowed_tools"]))
+    disallowed_tools: list[str] = Field(default_factory=lambda: list(_CLAUDE["disallowed_tools"]))
     extra_args: list[str] = []
 
 
-class OpencodeConfig(BaseModel):
+class OpencodeConfig(Section):
     command: list[str] = ["opencode"]
     model: str = ""
     timeout_s: int = 5400
     extra_args: list[str] = []
-    permission: dict[str, Any] = Field(default_factory=lambda: dict(DEFAULT_OPENCODE_PERMISSION))
+    permission: dict[str, Any] = Field(default_factory=lambda: _merge_permission({}))
 
 
-class RetryConfig(BaseModel):
+class RetryConfig(Section):
     initial_delay_s: float = 30
     multiplier: float = 2.0
     max_delay_s: float = 1800
@@ -161,27 +103,29 @@ class RetryConfig(BaseModel):
     @classmethod
     def validate_positive(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError("invalid retry")
+            raise ValueError("retry delays must be positive")
         return v
 
     @field_validator("usage_limit_margin_s")
     @classmethod
     def validate_margin(cls, v: float) -> float:
         if v < 0:
-            raise ValueError("invalid retry")
+            raise ValueError("usage_limit_margin_s must not be negative")
+        return v
+
+    @field_validator("multiplier")
+    @classmethod
+    def validate_multiplier(cls, v: float) -> float:
+        if v < 1:
+            raise ValueError("multiplier must be at least 1")
         return v
 
 
-class ConvergenceConfig(BaseModel):
-    max_corrections: int = 3
+class ConvergenceConfig(Section):
+    max_corrections: int = Field(default=3, ge=0)
 
 
-class ValidationConfig(BaseModel):
-    commands: list[str] = []
-    timeout_s: int = 1800
-
-
-class GitConfig(BaseModel):
+class GitConfig(Section):
     allow_dirty_start: bool = False
     branch_per_feature: bool = True
     branch_prefix: str = "orchestrator/"
@@ -189,119 +133,54 @@ class GitConfig(BaseModel):
     remote: str = "origin"
 
 
-class SafetyConfig(BaseModel):
+class SafetyConfig(Section):
     allow_unrestricted: bool = False
 
 
-class PhaseConfig(BaseModel):
-    id: str
-    prompt: str
-    expect: list[str] = []
-
-
-RESERVED_PHASE_IDS = {"implement", "converge", "correct"}
-
-
-class Config(BaseModel):
+class Config(Section):
     agents: dict[str, Any]
     retry: RetryConfig = Field(default_factory=RetryConfig)
     convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
-    validation: ValidationConfig = Field(default_factory=ValidationConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
-    phases: list[PhaseConfig] = []
-
-    @field_validator("phases")
-    @classmethod
-    def validate_phases(cls, v: list[PhaseConfig]) -> list[PhaseConfig]:
-        allowed = {"specify", "clarify", "plan", "tasks", "analyze", "post_analyze"}
-        for p in v:
-            if p.id in RESERVED_PHASE_IDS:
-                raise ValueError("reserved phase id")
-            if p.id.startswith("implement") or p.id.startswith("converge") or p.id.startswith("correct"):
-                raise ValueError("reserved phase id")
-            if p.id in allowed:
-                continue
-            if not re.match(r"^[a-z][a-z0-9_]*$", p.id):
-                raise ValueError("invalid phase id")
-        return v
-
-    @field_validator("retry")
-    @classmethod
-    def validate_retry(cls, v: RetryConfig) -> RetryConfig:
-        if v.initial_delay_s <= 0 or v.multiplier < 1:
-            raise ValueError("invalid retry")
-        return v
-
-    @field_validator("convergence")
-    @classmethod
-    def validate_convergence(cls, v: ConvergenceConfig) -> ConvergenceConfig:
-        if v.max_corrections < 0:
-            raise ValueError("invalid convergence")
-        return v
 
 
 def load_config(path: Path) -> Config:
-    raw = path.read_text()
-    data = tomllib.loads(raw)
+    data = tomllib.loads(path.read_text())
     cfg = build_config(data)
-    validate_config(cfg, data)
+    validate_config(cfg)
     return cfg
 
 
 def build_config(data: dict[str, Any]) -> Config:
-    claude = ClaudeConfig(**data.get("agents", {}).get("claude", {}))
-    opencode_raw = dict(data.get("agents", {}).get("opencode", {}))
-    perm_raw = opencode_raw.pop("permission", None)
-    opencode = OpencodeConfig(**opencode_raw)
-    if perm_raw is not None:
-        if isinstance(perm_raw, dict):
-            # merge into default
-            perm = dict(DEFAULT_OPENCODE_PERMISSION)
-            for k, v in perm_raw.items():
-                if k == "bash" and isinstance(v, dict):
-                    bash = dict(perm.get("bash", {}))
-                    bash.update(v)
-                    perm["bash"] = bash
-                else:
-                    perm[k] = v
-            opencode.permission = perm
-        elif isinstance(perm_raw, str):
-            perm = dict(DEFAULT_OPENCODE_PERMISSION)
-            perm["edit"] = perm_raw if perm_raw in ("allow", "deny", "ask") else perm.get("edit", "allow")
-            opencode.permission = perm
+    removed = [key for key in ("validation", "phases") if key in data]
+    if removed:
+        raise ValueError(f"unsupported config section: {', '.join(removed)} (removed; delete it from config.toml)")
+    agents = data.get("agents", {})
+    opencode = dict(agents.get("opencode", {}))
+    opencode["permission"] = _merge_permission(opencode.get("permission", {}))
+    claude = ClaudeConfig(**agents.get("claude", {}))
+    return Config(**{**data, "agents": {"claude": claude, "opencode": OpencodeConfig(**opencode)}})
+
+
+def _merge_permission(override: Any) -> dict[str, Any]:
+    perm = {**DEFAULT_OPENCODE_PERMISSION, "bash": dict(DEFAULT_OPENCODE_PERMISSION["bash"])}
+    if not isinstance(override, dict):
+        return perm
+    for key, value in override.items():
+        if key == "bash" and isinstance(value, dict):
+            perm["bash"].update(value)
         else:
-            opencode.permission = dict(DEFAULT_OPENCODE_PERMISSION)
-    else:
-        opencode.permission = dict(DEFAULT_OPENCODE_PERMISSION)
-    agents = {"claude": claude, "opencode": opencode}
-    d = dict(data)
-    d["agents"] = agents
-    phases = []
-    for p in d.get("phases", []) or []:
-        if isinstance(p, dict):
-            phases.append(PhaseConfig(**p))
-    d["phases"] = phases
-    return Config(**d)
+            perm[key] = value
+    return perm
 
 
-def validate_config(cfg: Config, raw: dict[str, Any]) -> None:
+def validate_config(cfg: Config) -> None:
     if cfg.safety.allow_unrestricted:
         return
-    # Claude checks
-    if cfg.agents["claude"].permission_mode == "bypassPermissions":
-        raise ValueError("unrestricted not allowed")
-    for a in cfg.agents["claude"].extra_args:
-        if a == "--dangerously-skip-permissions":
-            raise ValueError("unrestricted not allowed")
-    # OpenCode checks
-    perm = cfg.agents["opencode"].permission
-    if not isinstance(perm, dict):
-        raise TypeError("unrestricted not allowed")
-    bash = perm.get("bash")
-    if bash == "allow":
-        raise ValueError("unrestricted not allowed")
-    if not isinstance(bash, dict):
-        raise TypeError("unrestricted not allowed")
-    if not any(v == "deny" for v in bash.values()):
-        raise ValueError("unrestricted not allowed")
+    claude = cfg.agents["claude"]
+    if claude.permission_mode == "bypassPermissions" or "--dangerously-skip-permissions" in claude.extra_args:
+        raise ValueError("unrestricted Claude permissions require safety.allow_unrestricted = true")
+    bash = cfg.agents["opencode"].permission.get("bash")
+    if not isinstance(bash, dict) or "deny" not in bash.values():
+        raise ValueError("OpenCode bash permission needs at least one deny rule unless safety.allow_unrestricted = true")

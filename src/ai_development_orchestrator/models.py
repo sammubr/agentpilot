@@ -2,44 +2,46 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from enum import Enum, StrEnum
+from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
-
-
-class Outcome(StrEnum):
-    ok = "ok"
-    deferred = "deferred"
-    completed = "completed"
-    blocked = "blocked"
-    failed = "failed"
-    paused = "paused"
-    stopped = "stopped"
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class FeatureStatus(str, Enum):
+class Stage(StrEnum):
+    specify = "specify"
+    clarify = "clarify"
+    plan = "plan"
+    tasks = "tasks"
+    analyze = "analyze"
+    implement = "implement"
+    converge = "converge"
+
+
+PLANNING = [Stage.specify, Stage.clarify, Stage.plan, Stage.tasks, Stage.analyze]
+
+
+class FeatureStatus(StrEnum):
     pending = "pending"
     in_progress = "in_progress"
     completed = "completed"
     blocked = "blocked"
-    failed = "failed"
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     idle = "idle"
     running = "running"
     waiting = "waiting"
     paused = "paused"
     stopped = "stopped"
     finished = "finished"
-    halted = "halted"
 
 
-class FailureKind(str, Enum):
+class FailureKind(StrEnum):
     usage_limit = "usage_limit"
     auth = "auth"
     network = "network"
@@ -48,135 +50,81 @@ class FailureKind(str, Enum):
     execution_error = "execution_error"
 
 
-class AgentName(str, Enum):
+class AgentName(StrEnum):
     claude = "claude"
     opencode = "opencode"
-
-
-class Dependency(BaseModel):
-    id: str
-    rationale: str | None = None
-    added_by: str
-
-    @field_validator("added_by")
-    @classmethod
-    def validate_added_by(cls, v: str) -> str:
-        if v not in ("operator", "claude"):
-            raise ValueError("added_by must be operator or claude")
-        return v
-
-
-class HistoryEvent(BaseModel):
-    at: datetime
-    step: str | None = None
-    event: str
-    detail: str
 
 
 class Feature(BaseModel):
     id: str
     title: str
     description: str
-    dependencies: list[Dependency] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
     status: FeatureStatus = FeatureStatus.pending
     spec_dir: str | None = None
     branch: str | None = None
-    base_commit: str | None = None
-    completed_steps: list[str] = Field(default_factory=list)
-    attempts: dict[str, int] = Field(default_factory=dict)
-    sessions: dict[str, str] = Field(default_factory=dict)
-    correction_round: int = 0
-    validation_commands: list[str] = Field(default_factory=list)
-    block_reason: str | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    history: list[HistoryEvent] = Field(default_factory=list)
+    done: list[Stage] = Field(default_factory=list)
+    round: int = 0
+    attempts: int = 0
+    session_id: str | None = None
+    last_error: str | None = None
 
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", v):
-            raise ValueError("invalid feature id")
+            raise ValueError(f"invalid feature id: {v!r}")
         return v
 
-    @field_validator("title")
+    @field_validator("title", "description")
     @classmethod
-    def validate_title(cls, v: str) -> str:
-        if not v:
-            raise ValueError("title non-empty")
+    def validate_text(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("title and description must be non-empty")
         return v
-
-    @field_validator("description")
-    @classmethod
-    def validate_description(cls, v: str) -> str:
-        if not v:
-            raise ValueError("description non-empty")
-        return v
-
-
-class PendingRecovery(BaseModel):
-    feature_id: str
-    step: str
-    kind: FailureKind
-    attempt: int
-    next_retry_at: datetime
-    message: str
 
 
 class RunState(BaseModel):
+    id: str | None = None
     status: RunStatus = RunStatus.idle
-    current_feature: str | None = None
-    current_step: str | None = None
-    current_phase: str | None = None
-    current_agent: AgentName | None = None
-    active_step: str | None = None
-    last_checkpoint: str | None = None
-    pending_recovery: PendingRecovery | None = None
-    last_error: str | None = None
-    status_reason: str | None = None
+    reason: str | None = None
+    feature: str | None = None
+    stage: Stage | None = None
+    agent: AgentName | None = None
+    checkpoint: str | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
 
 
 class State(BaseModel):
-    version: int = 1
+    version: int = 2
     features: list[Feature] = Field(default_factory=list)
     run: RunState = Field(default_factory=RunState)
+    unavailable: dict[AgentName, datetime] = Field(default_factory=dict)
 
-
-class Finding(BaseModel):
-    severity: str
-    description: str
-    location: str | None = None
-
-
-class AcceptanceCriterionResult(BaseModel):
-    criterion: str
-    met: bool
-    evidence: str
-
-
-class Verdict(BaseModel):
-    approved: bool
-    summary: str
-    findings: list[Finding] = Field(default_factory=list)
-    acceptance_criteria: list[AcceptanceCriterionResult] = Field(default_factory=list)
-
-    @field_validator("findings")
+    @model_validator(mode="before")
     @classmethod
-    def validate_findings(cls, v: list[Finding]) -> list[Finding]:
-        for f in v:
-            if f.severity not in ("critical", "major", "minor"):
-                raise ValueError("invalid severity")
-        return v
+    def upgrade(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("version", 1) == 1 and "features" in data:
+            return migrate_v1(data)
+        return data
 
 
-class ValidationResult(BaseModel):
-    command: str
-    exit_code: int | None
-    passed: bool
-    output_tail: str
-    duration_s: float
+def migrate_v1(data: dict) -> dict:
+    return {"version": 2, "features": [_migrate_feature(item) for item in data.get("features", [])]}
+
+
+def _migrate_feature(item: dict) -> dict:
+    status = {"completed": "completed", "blocked": "blocked", "failed": "blocked"}.get(item.get("status"), "pending")
+    steps = item.get("completed_steps", [])
+    done = [stage for stage in PLANNING if stage.value in steps]
+    if any(step == "implement.run" or step.startswith("correct.run.") for step in steps):
+        done.append(Stage.implement)
+    return {
+        "id": item["id"], "title": item["title"], "description": item["description"],
+        "depends_on": [dep["id"] if isinstance(dep, dict) else dep for dep in item.get("dependencies", [])],
+        "status": status, "spec_dir": item.get("spec_dir"), "branch": item.get("branch"), "done": done,
+    }
 
 
 class ProcessResult(BaseModel):
@@ -194,4 +142,4 @@ class AgentResult(BaseModel):
     message: str = ""
     session_id: str | None = None
     reset_at: datetime | None = None
-    process: ProcessResult
+    process: ProcessResult = Field(default_factory=ProcessResult)

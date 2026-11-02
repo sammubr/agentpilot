@@ -17,7 +17,7 @@ def test_state_roundtrip(tmp_path):
     s = ws.load_state()
     ws.save_state(s)
     s2 = ws.load_state()
-    assert s2.version == 1
+    assert s2.version == 2
 
 
 def test_lock_exclusivity(tmp_path):
@@ -88,3 +88,28 @@ time.sleep(10)
     assert pid == p.pid
     p.kill()
     p.wait()
+
+
+def test_v1_state_is_migrated(tmp_path):
+    import json
+
+    ws = Workspace(tmp_path)
+    ws.init()
+    old = {
+        "version": 1,
+        "features": [
+            {"id": "F1", "title": "t", "description": "d", "status": "in_progress", "spec_dir": "specs/001-x",
+             "branch": "orchestrator/F1", "dependencies": [{"id": "F0", "added_by": "operator"}],
+             "completed_steps": ["select", "specify", "clarify", "plan", "tasks", "analyze", "implement.handoff", "implement.run"]},
+            {"id": "F0", "title": "t", "description": "d", "status": "failed"},
+        ],
+        "run": {"status": "halted"},
+    }
+    ws.state_path.write_text(json.dumps(old))
+    state = ws.load_state()
+    f1, f0 = state.features
+    assert state.version == 2
+    assert f1.status == "pending" and f1.depends_on == ["F0"] and f1.branch == "orchestrator/F1"
+    assert f1.done == ["specify", "clarify", "plan", "tasks", "analyze", "implement"]
+    assert f0.status == "blocked"
+    assert state.run.status == "idle"
