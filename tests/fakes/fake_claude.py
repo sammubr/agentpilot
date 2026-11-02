@@ -243,6 +243,8 @@ none
             if behavior == "bad_handoff":
                 handoff = handoff.replace("\n## Restrictions\nnone\n", "\n")
             (sd / "handoff-implement.md").write_text(handoff)
+            if behavior != "no_validation_file":
+                (sd / "validation-commands.json").write_text(json.dumps(["test ! -f BROKEN"]))
         print(json.dumps({"type": "result", "is_error": False, "result": "ok", "session_id": "sess1"}))
         return
     if step and step.startswith("converge"):

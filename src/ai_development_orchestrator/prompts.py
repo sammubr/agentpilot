@@ -11,6 +11,7 @@ HANDOFF_SECTIONS = [
     "## Architecture Decisions", "## Acceptance Criteria", "## Validations", "## Restrictions",
 ]
 CORRECTION_EXTRA_SECTION = "## Findings To Fix"
+VALIDATION_COMMANDS_FILE = "validation-commands.json"
 PREAMBLE = """You are the engineering agent of an autonomous development orchestrator working in this repository.
 Rules:
 - Work non-interactively. Never ask questions or wait for confirmation. When information is missing,
@@ -75,6 +76,14 @@ share your context. It must be self-contained and contain these level-2 sections
 ## Restrictions - implement only this feature; do not commit, push or switch branches; do not modify
 files under specs/ except checking off tasks in tasks.md; no destructive commands; no new
 dependencies unless the plan requires them.
+{validation_file}"""
+
+VALIDATION_FILE_PROMPT = """Also write {spec_dir}/orchestrator/validation-commands.json: a JSON list of the shell commands
+that prove this feature works and nothing else broke (tests, lint, type checks, build), taken from the
+project's own build files and instructions. The orchestrator runs each one with `bash -c` from the
+repository root during every review, so include any `cd` into a subproject. Keep them non-interactive
+and free of side effects outside the repository; never include commands that start servers, deploy,
+install packages or call external services.
 """
 
 POST_ANALYZE_PROMPT = """Step: Post-implementation analysis. Feature directory: {spec_dir}
@@ -162,7 +171,10 @@ def _step_prompt(step: str, feature: Feature, state: State, spec_dir: str | None
     if step == "specify":
         return SPECIFY_PROMPT.format(title=feature.title, description=feature.description)
     if step in STEP_PROMPTS:
-        return STEP_PROMPTS[step].format(spec_dir=directory, validation_commands=_validation_commands(cfg))
+        return STEP_PROMPTS[step].format(
+            spec_dir=directory, validation_commands=_validation_commands(cfg),
+            validation_file=_validation_file(cfg, directory),
+        )
     if step.startswith("converge."):
         return CONVERGE_PROMPT.format(spec_dir=directory, round=round)
     if step.startswith("correct.handoff."):
@@ -181,7 +193,11 @@ def _backlog(feature: Feature, state: State) -> str:
 
 
 def _validation_commands(cfg: Config | None) -> str:
-    return "; ".join(cfg.validation.commands) if cfg and cfg.validation.commands else "the test commands defined in the plan"
+    return "; ".join(cfg.validation.commands) if cfg and cfg.validation.commands else "the commands you list in validation-commands.json"
+
+
+def _validation_file(cfg: Config | None, directory: str) -> str:
+    return "" if cfg and cfg.validation.commands else VALIDATION_FILE_PROMPT.format(spec_dir=directory)
 
 
 def _extra_phase(step: str, directory: str, cfg: Config | None) -> str:

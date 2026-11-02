@@ -32,6 +32,9 @@ def test_rejection_runs_one_correction_then_completes(workspace, scenario, calls
     assert steps.count("correct.handoff.1") == 1
     assert steps.count("correct.run.1") == 1
     assert steps.count("converge.1") == 1
+    run = next(record for record in calls(path) if record["step"] == "correct.run.1")
+    assert "handoff-correction-1.md" in run["argv"][-1]
+    assert "round=1" in run["argv"][-1]
 
 
 def test_exhausted_rejections_block_with_findings_and_validation_exit(workspace, scenario, calls, monkeypatch):
@@ -110,3 +113,53 @@ def test_retry_preserves_base_commit_and_original_diff(workspace, scenario, monk
     assert resumed == RunStatus.finished
     assert state.features[0].base_commit == original_base
     assert "src/F1.txt" in diff
+
+
+def test_correction_without_changes_fails_after_execution_retries(workspace, scenario, calls, monkeypatch):
+    _add_feature(workspace)
+    path = scenario({"claude": {"converge": "reject"}, "opencode": {"correct.run.1": "no_changes"}})
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", path)
+
+    result = Engine(workspace, load_config(workspace.config_path), sleep=lambda _: None, handle_signals=False).run()
+
+    feature = workspace.load_state().features[0]
+    assert result == RunStatus.halted
+    assert feature.status == FeatureStatus.failed
+    assert feature.block_reason == "implementation produced no changes"
+    steps = [record["step"] for record in calls(path)]
+    assert steps.count("correct.run.1") == 3
+    assert "converge.1" not in steps
+
+
+def test_handoff_validation_commands_run_when_config_has_none(workspace, scenario, monkeypatch):
+    _add_feature(workspace)
+    path = scenario({"claude": {}, "opencode": {"implement.run": "break", "correct.run.1": "ok"}})
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", path)
+    config = load_config(workspace.config_path)
+    config.validation.commands = []
+
+    result = Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run()
+
+    feature = workspace.load_state().features[0]
+    validation = json.loads((workspace.repo / feature.spec_dir / "orchestrator" / "validation-0.json").read_text())
+    assert result == RunStatus.finished
+    assert feature.validation_commands == ["test ! -f BROKEN"]
+    assert validation[0]["command"] == "test ! -f BROKEN"
+    assert validation[0]["passed"] is False
+    assert "Handoff validation commands: test ! -f BROKEN" in workspace.report_path.read_text()
+
+
+def test_handoff_without_validation_commands_is_rejected(workspace, scenario, calls, monkeypatch):
+    _add_feature(workspace)
+    path = scenario({"claude": {"implement.handoff": "no_validation_file"}, "opencode": {}})
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", path)
+    config = load_config(workspace.config_path)
+    config.validation.commands = []
+
+    result = Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run()
+
+    feature = workspace.load_state().features[0]
+    assert result == RunStatus.halted
+    assert feature.status == FeatureStatus.failed
+    assert "validation-commands.json" in feature.block_reason
+    assert "implement.run" not in [record["step"] for record in calls(path)]
