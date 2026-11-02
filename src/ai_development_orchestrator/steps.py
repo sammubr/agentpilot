@@ -12,7 +12,7 @@ from .config import Config
 from .gitops import GitError
 from .models import AgentResult, Feature, ValidationResult, Verdict
 from .process import run_process
-from .prompts import missing_sections
+from .prompts import VALIDATION_COMMANDS_FILE, missing_sections
 
 
 @dataclass(frozen=True)
@@ -121,11 +121,10 @@ def _read_json(path: Path):
         return None
 
 
-def run_validations(repo: Path, cfg: Config, run_dir: Path) -> list[ValidationResult]:
-    commands = cfg.validation.commands
+def run_validations(repo: Path, commands: list[str], timeout_s: int, run_dir: Path) -> list[ValidationResult]:
     results = []
     for index, command in enumerate(commands):
-        results.append(_run_validation(repo, command, cfg.validation.timeout_s, run_dir / str(index)))
+        results.append(_run_validation(repo, command, timeout_s, run_dir / str(index)))
     return results
 
 
@@ -167,8 +166,8 @@ def verify(step: Step, repo: Path, feature: Feature, result: AgentResult, cfg: C
     if step_id in {"clarify", "plan", "tasks", "analyze", "post_analyze"}:
         return _verify_artifact(step_id, repo, feature)
     if step_id == "implement.handoff":
-        return _verify_handoff(repo, feature, "handoff-implement.md", False)
-    if step_id == "implement.run":
+        return _verify_handoff(repo, feature, "handoff-implement.md", False) or _verify_validation_commands(repo, feature, cfg)
+    if step_id == "implement.run" or step_id.startswith("correct.run."):
         return _verify_changes(repo, feature)
     if step_id.startswith("converge."):
         return _verify_verdict(repo, feature, step_id)
@@ -234,6 +233,19 @@ def _verify_handoff(repo: Path, feature: Feature, filename: str, correction: boo
         return f"missing file: {feature.spec_dir}/orchestrator/{filename}"
     sections = missing_sections(text, correction=correction)
     return "missing sections: " + ", ".join(sections) if sections else None
+
+
+def _verify_validation_commands(repo: Path, feature: Feature, cfg: Config | None) -> str | None:
+    if cfg and cfg.validation.commands:
+        return None
+    relative = f"{feature.spec_dir}/orchestrator/{VALIDATION_COMMANDS_FILE}"
+    data = _read_json(repo / relative)
+    if data is None:
+        return f"missing file: {relative}"
+    if not isinstance(data, list) or not all(isinstance(item, str) and item.strip() for item in data):
+        return f"invalid {relative}: expected a JSON list of shell commands"
+    feature.validation_commands = data
+    return None
 
 
 def _verify_changes(repo: Path, feature: Feature) -> str | None:

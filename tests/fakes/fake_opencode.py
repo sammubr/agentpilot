@@ -130,7 +130,7 @@ def main():
     try:
         src = Path(repo) / "src"
         src.mkdir(parents=True, exist_ok=True)
-        (src / f"{feature or 'out'}.txt").write_text("ok")
+        (src / f"{feature or 'out'}.txt").write_text(f"ok {step}")
         broken = Path(repo) / "BROKEN"
         if broken.exists():
             broken.unlink()

@@ -113,7 +113,7 @@ and 3 when an operation is refused because another orchestrator holds the lock.
 | `usage_limit_margin_s` | `60` | Extra wait after a reported reset time. |
 | `resume_sessions` | `true` | Resume agent sessions on retries when a session ID is available. |
 | `[convergence].max_corrections` | `3` | Maximum correction rounds before the feature is blocked. |
-| `[validation].commands` | `[]` | Shell commands run during every convergence review. |
+| `[validation].commands` | `[]` | Shell commands run during every convergence review. When empty, the commands the engineering agent lists in the feature's `orchestrator/validation-commands.json` are run instead. |
 | `timeout_s` | `1800` | Timeout for each validation command. |
 | `[git].allow_dirty_start` | `false` | Refuse a new run on a dirty working tree unless enabled. |
 | `branch_per_feature` | `true` | Use a separate `<branch_prefix><feature-id>` branch per feature. |
@@ -165,14 +165,14 @@ complete.
 | `select` | Claude Code | Review and record undeclared dependencies. |
 | `specify`, `clarify`, `plan`, `tasks`, `analyze` | Claude Code | Create and review the Spec Kit artifacts. |
 | Configured extra phases | Claude Code | Run in config order and verify expected files. |
-| `implement.handoff` | Claude Code | Write a structured implementation handoff. |
+| `implement.handoff` | Claude Code | Write a structured implementation handoff and, without configured validation commands, `validation-commands.json`. |
 | `implement.run` | OpenCode | Implement the handoff. |
 | `post_analyze` | Claude Code | Review the implementation diff. |
 | `converge.N` | Claude Code | Run validations, review evidence and approve or request correction. |
 | `correct.handoff.N`, `correct.run.N` | Claude Code, OpenCode | Apply a requested correction before the next review. |
 
 Each successful step is checkpointed in Git. A feature is completed only when the verdict is
-approved and all configured validation commands pass. Rejected work is corrected up to the configured
+approved and all validation commands pass. Rejected work is corrected up to the configured
 limit, then marked blocked with the reason and findings.
 
 ## Recovery and usage limits

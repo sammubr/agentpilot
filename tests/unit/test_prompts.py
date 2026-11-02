@@ -84,3 +84,14 @@ def test_golden_prompt_sections_paths_and_review_instructions():
     assert f"{spec_dir}/orchestrator/diff-post.patch" in post
     clarify = prompts.engineering_prompt("clarify", feature, state, spec_dir)
     assert "recommended option" in clarify
+
+
+def test_handoff_asks_for_validation_file_only_without_configured_commands():
+    f = Feature(id="001-test", title="Test", description="desc")
+    s = State()
+    without = prompts.engineering_prompt("implement.handoff", f, s, "specs/001-test", cfg=build_config({}))
+    configured = build_config({"validation": {"commands": ["make test"]}})
+    with_commands = prompts.engineering_prompt("implement.handoff", f, s, "specs/001-test", cfg=configured)
+    assert "specs/001-test/orchestrator/validation-commands.json" in without
+    assert "validation-commands.json" not in with_commands
+    assert "make test" in with_commands

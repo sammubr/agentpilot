@@ -114,7 +114,7 @@ def render_report(state: State, now: datetime) -> str:
 def _feature_report(feature: Feature, now: datetime) -> list[str]:
     duration = _elapsed(feature.started_at, feature.finished_at or now)
     dependencies = ", ".join(f"{item.id} ({item.added_by}{': ' + item.rationale if item.rationale else ''})" for item in feature.dependencies) or "-"
-    lines = ["", f"## {feature.id}: {feature.title}", "", f"- Status: {feature.status.value}", f"- Branch: {feature.branch or '-'}", f"- Spec directory: {feature.spec_dir or '-'}", f"- Dependencies: {dependencies}", f"- Completed steps: {', '.join(feature.completed_steps) or '-'}", f"- Attempts: {json.dumps(feature.attempts, sort_keys=True) or '{}'}", f"- Duration: {_format_duration(duration)}", f"- Correction rounds: {feature.correction_round}", f"- Last verdict: {_last_verdict(feature) or '-'}", f"- Block/failure reason: {feature.block_reason or '-'}", "- Recent history:"]
+    lines = ["", f"## {feature.id}: {feature.title}", "", f"- Status: {feature.status.value}", f"- Branch: {feature.branch or '-'}", f"- Spec directory: {feature.spec_dir or '-'}", f"- Dependencies: {dependencies}", f"- Completed steps: {', '.join(feature.completed_steps) or '-'}", f"- Attempts: {json.dumps(feature.attempts, sort_keys=True) or '{}'}", f"- Duration: {_format_duration(duration)}", f"- Correction rounds: {feature.correction_round}", f"- Handoff validation commands: {'; '.join(feature.validation_commands) or '-'}", f"- Last verdict: {_last_verdict(feature) or '-'}", f"- Block/failure reason: {feature.block_reason or '-'}", "- Recent history:"]
     history = feature.history[-10:]
     lines.extend(f"  - {item.at.isoformat()} {item.event} ({item.step or '-'}) — {item.detail}" for item in history)
     if not history:

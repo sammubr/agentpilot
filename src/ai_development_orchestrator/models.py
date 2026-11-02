@@ -86,6 +86,7 @@ class Feature(BaseModel):
     attempts: dict[str, int] = Field(default_factory=dict)
     sessions: dict[str, str] = Field(default_factory=dict)
     correction_round: int = 0
+    validation_commands: list[str] = Field(default_factory=list)
     block_reason: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

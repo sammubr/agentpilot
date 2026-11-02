@@ -514,7 +514,11 @@ class Engine:
         if step.id.startswith("converge."):
             round_number = int(step.id.split(".")[1])
             orchestrator.mkdir(parents=True, exist_ok=True)
-            validations = run_validations(self.ws.repo, self.cfg, self.ws.new_run_dir(feature.id, step.id, feature.attempts.get(step.id, 0) + 1))
+            commands = self.cfg.validation.commands or feature.validation_commands
+            source = "config" if self.cfg.validation.commands else "handoff"
+            self._log("validations_started", feature=feature.id, step=step.id, source=source, commands=commands)
+            run_dir = self.ws.new_run_dir(feature.id, step.id, feature.attempts.get(step.id, 0) + 1)
+            validations = run_validations(self.ws.repo, commands, self.cfg.validation.timeout_s, run_dir)
             (orchestrator / f"validation-{round_number}.json").write_text(json.dumps([item.model_dump(mode="json") for item in validations]))
             if feature.base_commit:
                 (orchestrator / f"diff-{round_number}.patch").write_text(gitops.diff(self.ws.repo, feature.base_commit))
@@ -526,7 +530,7 @@ class Engine:
 
     def _prompt(self, feature: Feature, step: Step) -> str:
         assert self.state is not None
-        round_number = int(step.id.split(".")[-1]) if step.id.startswith(("converge.", "correct.handoff.")) else 0
+        round_number = int(step.id.split(".")[-1]) if step.id.startswith(("converge.", "correct.")) else 0
         retry_note = self._retry_note(feature, step)
         if step.agent == AgentName.opencode:
             suffix = f"correction-{round_number}" if step.id.startswith("correct.run.") else "implement"
