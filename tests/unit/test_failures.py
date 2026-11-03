@@ -39,6 +39,23 @@ def test_parse_resets_time():
     assert r is not None
 
 
+def test_parse_iso_time():
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    r = failures.parse_reset_time("limit resets 2026-01-01T12:30:00Z.", now)
+    assert r == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+
+def test_parse_iso_time_ignores_trailing_text():
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    r = failures.parse_reset_time('"scheduledAt": "2026-11-10T14:00:00Z\\",\\n26:', now)
+    assert r == datetime(2026, 11, 10, 14, 0, tzinfo=UTC)
+
+
+def test_parse_invalid_iso_time_is_ignored():
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    assert failures.parse_reset_time("2026-13-45T99:00:00Z", now) is None
+
+
 def test_classify_patterns():
     from ai_development_orchestrator import failures
     from ai_development_orchestrator.models import FailureKind

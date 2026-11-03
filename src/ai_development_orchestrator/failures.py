@@ -58,11 +58,14 @@ def _relative_time(text: str, now: datetime) -> datetime | None:
 
 
 def _iso_time(text: str, now: datetime) -> datetime | None:
-    match = re.search(r"(\d{4}-\d{2}-\d{2}T[^\s]+Z?)", text)
+    match = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?", text)
     if not match:
         return None
-    value = match.group(1)
-    return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    try:
+        parsed = datetime.fromisoformat(match.group(0).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _clock_time(text: str, now: datetime) -> datetime | None:

@@ -35,7 +35,7 @@ def _failure(message: str, stderr: str, proc: ProcessResult, api_status=None, se
         kind = FailureKind.timeout
     if kind is None:
         kind = FailureKind.execution_error
-    reset_at = parse_reset_time(combined_fail, utcnow())
+    reset_at = parse_reset_time(combined_fail, utcnow()) if kind == FailureKind.usage_limit else None
     return AgentResult(ok=False, failure=kind, message=str(message)[:2000], session_id=session_id, reset_at=reset_at, process=proc)
 
 
@@ -145,7 +145,7 @@ def _event_text(event: dict) -> list[str]:
 
 def _opencode_failure(message: str, combined: str, proc: ProcessResult, session_id: str | None) -> AgentResult:
     kind = classify(message + "\n" + combined, proc.timed_out, proc.exit_code) or FailureKind.execution_error
-    reset_at = parse_reset_time(message + "\n" + combined, utcnow())
+    reset_at = parse_reset_time(message + "\n" + combined, utcnow()) if kind == FailureKind.usage_limit else None
     return AgentResult(ok=False, failure=kind, message=message[:2000], session_id=session_id, reset_at=reset_at, process=proc)
 
 
