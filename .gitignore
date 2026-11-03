@@ -224,3 +224,10 @@ __marimo__/
 .opencode
 specs
 src/out.txt
+
+# Editor and operating system artifacts
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/

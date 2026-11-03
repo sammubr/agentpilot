@@ -132,6 +132,13 @@ class GitConfig(Section):
     push: bool = False
     remote: str = "origin"
 
+    @field_validator("branch_per_feature")
+    @classmethod
+    def require_feature_branches(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("branch_per_feature must be true")
+        return value
+
 
 class SafetyConfig(Section):
     allow_unrestricted: bool = False
@@ -153,6 +160,13 @@ def load_config(path: Path) -> Config:
 
 
 def build_config(data: dict[str, Any]) -> Config:
+    data = dict(data)
+    git = dict(data.get("git", {}))
+    legacy_base_branch = git.pop("base_branch", "")
+    if legacy_base_branch:
+        raise ValueError("git.base_branch is no longer supported; AgentPilot uses the repository default branch")
+    if "git" in data:
+        data["git"] = git
     removed = [key for key in ("validation", "phases") if key in data]
     if removed:
         raise ValueError(f"unsupported config section: {', '.join(removed)} (removed; delete it from config.toml)")

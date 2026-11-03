@@ -1,3 +1,5 @@
+import pytest
+
 from ai_development_orchestrator.config import DEFAULT_CONFIG_TOML, load_config
 
 
@@ -7,6 +9,31 @@ def test_defaults_load(tmp_path):
     cfg = load_config(p)
     assert cfg.git.branch_prefix == "orchestrator/"
     assert cfg.retry.max_attempts_network == 10
+
+
+def test_empty_legacy_base_branch_is_accepted(tmp_path):
+    p = tmp_path / "config.toml"
+    text = DEFAULT_CONFIG_TOML.replace("[git]\n", '[git]\nbase_branch = ""\n')
+    p.write_text(text)
+
+    assert load_config(p).git.branch_per_feature
+
+
+def test_nonempty_legacy_base_branch_is_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    text = DEFAULT_CONFIG_TOML.replace("[git]\n", '[git]\nbase_branch = "main"\n')
+    p.write_text(text)
+
+    with pytest.raises(ValueError, match="repository default branch"):
+        load_config(p)
+
+
+def test_disabling_per_feature_branches_is_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(DEFAULT_CONFIG_TOML.replace("branch_per_feature = true", "branch_per_feature = false"))
+
+    with pytest.raises(ValueError, match="branch_per_feature"):
+        load_config(p)
 
 
 def test_unrestricted_rejected(tmp_path):

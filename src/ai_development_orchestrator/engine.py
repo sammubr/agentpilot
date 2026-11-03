@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from . import gitops, speckit
 from .agents import run_agent
-from .backlog import next_feature, waiting_on
+from .backlog import next_feature
 from .config import Config
 from .failures import decide
 from .gitops import GitError
@@ -101,9 +101,10 @@ class Engine:
                     return self._set_status(RunStatus.idle, "max features reached")
 
     def _finish(self) -> None:
-        waiting = [f"{f.id} waits on {','.join(waiting_on(f, self.state))}" for f in self.state.features if f.status == FeatureStatus.pending]
+        head = next((feature for feature in self.state.features if feature.status != FeatureStatus.completed), None)
+        reason = f"blocked at {head.id}; retry {head.id} to continue" if head and head.status == FeatureStatus.blocked else None
         self._clear_current()
-        self._set_status(RunStatus.finished, "; ".join(waiting) or None)
+        self._set_status(RunStatus.finished, reason)
 
     def _run_feature(self, feature: Feature) -> None:
         if not self._enter_branch(feature):
@@ -121,24 +122,45 @@ class Engine:
     def _enter_branch(self, feature: Feature) -> bool:
         feature.status = FeatureStatus.in_progress
         repo = self.ws.repo
-        while self.cfg.git.branch_per_feature and gitops.repos(repo):
-            target = feature.branch or self.cfg.git.branch_prefix + feature.id
-            if gitops.current_branch(repo) == target:
-                break
-            dirty = gitops.dirty_files(repo)
-            if not dirty:
-                gitops.ensure_branch(repo, target)
+        if not self.cfg.git.branch_per_feature:
+            raise GitError("branch_per_feature must be true")
+        target = feature.branch or self.cfg.git.branch_prefix + feature.id
+        try:
+            feature.branch_base = self._expected_branch_base(feature)
+            self._save()
+            while gitops.repos(repo):
+                current = gitops.current_branch(repo)
+                if current != target:
+                    dirty = gitops.dirty_files(repo)
+                    if dirty and not self.cfg.git.allow_dirty_start:
+                        if self._pause("unexpected_changes: " + ", ".join(dirty)):
+                            return False
+                        continue
+                gitops.ensure_branch(repo, target, start_point=feature.branch_base)
                 feature.branch = gitops.current_branch(repo)
                 break
-            if self.cfg.git.allow_dirty_start and not feature.branch:
-                break
-            if self._pause("unexpected_changes: " + ", ".join(dirty)):
-                return False
+        except GitError as error:
+            self._block(feature, str(error))
+            return False
         feature.branch = feature.branch or gitops.current_branch(repo)
         if self.state.run.feature != feature.id:
             self.state.run.checkpoint = gitops.head_sha(repo)
         self._save()
         return True
+
+    def _expected_branch_base(self, feature: Feature) -> str:
+        index = next(i for i, item in enumerate(self.state.features) if item.id == feature.id)
+        if index:
+            predecessor = self.state.features[index - 1]
+            if predecessor.status != FeatureStatus.completed or not predecessor.branch:
+                raise GitError(f"predecessor feature {predecessor.id} is not completed on a branch")
+            expected = predecessor.branch
+        else:
+            expected = gitops.default_branch(self.ws.repo)
+        if not expected:
+            raise GitError(f"no base branch is available for feature {feature.id}")
+        feature.branch_base = expected
+        return expected
 
     def _execute(self, feature: Feature, stage: Stage) -> bool:
         unexpected = self._unexpected(feature, stage)

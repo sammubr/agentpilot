@@ -62,7 +62,7 @@ def _iso_time(text: str, now: datetime) -> datetime | None:
     if not match:
         return None
     try:
-        parsed = datetime.fromisoformat(match.group(0).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(match.group(0))
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

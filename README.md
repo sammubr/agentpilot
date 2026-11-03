@@ -76,7 +76,7 @@ Use `--repo PATH` before a command to operate on another repository, for example
 | Command | Arguments and options | Purpose |
 |---|---|---|
 | `init` | `[--force]` | Create `.orchestrator/` with config, empty state and the event log. Existing config is refused unless forced. |
-| `add` | `ID TITLE --description TEXT [--depends-on ID]...` | Append one pending feature. |
+| `add` | `ID TITLE --description TEXT` | Append one pending feature to the backlog. |
 | `import` | `FILE` | Append features from YAML or JSON in file order. |
 | `check` | | Check Git, Spec Kit commands, agent `--version`, config and backlog validity. |
 | `run` | `[--max-features N]` | Start a run session. |
@@ -122,7 +122,7 @@ and 3 when another orchestrator holds the lock.
 | `resume_sessions` | `true` | Resume the agent session when a stage is retried. |
 | `[convergence].max_corrections` | `3` | Implement → converge rounds allowed after the first implementation before the feature is blocked. |
 | `[git].allow_dirty_start` | `false` | Refuse a new run on a dirty working tree unless enabled. |
-| `branch_per_feature` | `true` | Use a separate `<branch_prefix><feature-id>` branch per feature. |
+| `branch_per_feature` | `true` | A separate `<branch_prefix><feature-id>` branch is required for every feature; `false` is rejected. |
 | `branch_prefix` | `"orchestrator/"` | Prefix for feature branches. |
 | `push` | `false` | Push completed feature branches when enabled. |
 | `remote` | `"origin"` | Git remote used for configured pushes. |
@@ -145,23 +145,32 @@ The default OpenCode Bash deny rules are `rm -rf *`, `rm -r *`, `rm -fr *`, `sud
 
 ## Backlog format
 
-YAML, YML, or JSON input has a `features` list. Dependencies refer to feature IDs in the combined
-backlog and must be acyclic.
+YAML, YML, or JSON input has a `features` list. Features are processed in list order. Legacy
+`depends_on` or `dependencies` fields are ignored and do not affect import or execution order.
 
 ```yaml
 features:
   - id: F1
     title: User login
     description: Users can log in with email and password.
-    depends_on: []
   - id: F2
     title: Profile page
     description: Logged-in users can edit their profile.
-    depends_on: [F1]
 ```
 
-Features run in backlog order once their dependencies are completed. A blocked feature does not stop
-the run: features that do not depend on it continue.
+AgentPilot runs one feature at a time in backlog order; a later feature does not start until the
+previous feature is complete. Dependency metadata never changes that order.
+
+The first feature branch always starts from the repository's default remote branch, normally the
+target of `origin/HEAD`, regardless of the currently checked-out branch. Every subsequent feature
+branch starts from the immediately preceding feature branch. Existing branches are reused only if
+their ancestry matches the expected base; AgentPilot does not rebase or reset them. If Git cannot
+resolve a remote default, AgentPilot uses an unambiguous local default (`main`/`master`, or the only
+local branch). If no default can be determined, the feature is blocked rather than using the current
+checkout. A legacy non-empty `[git].base_branch` setting is rejected; an empty value is ignored.
+
+If a feature becomes blocked, the run stops at that feature and leaves later features pending. Use
+`agentpilot retry <ID>` to requeue it; after it completes, the next feature starts on its branch.
 
 ## How a feature is processed
 
@@ -188,7 +197,8 @@ artifact is missing (for example a deleted `plan.md`) is repeated together with 
   or a growing fallback delay. No call is made to it before then, even across restarts, and the
   same stage is then repeated. Usage limits never block a feature.
 - **Network and execution failures.** These are retried with bounded backoff. When attempts run
-  out, the feature is blocked with the reason and the run continues with independent features.
+  out, the feature is blocked with the reason and later features remain pending. Use `agentpilot
+  retry <ID>` to requeue the blocker and continue the ordered backlog after it completes.
 - **Authentication failures.** These pause the run. Fix the credentials and run `resume`.
 - **Interruptions.** After a crash, reboot or `stop`, `continue` repeats only the interrupted stage
   and keeps its partial changes.
@@ -203,8 +213,9 @@ for your environment; `safety.allow_unrestricted` disables the configuration gua
 
 The orchestrator owns Git checkpoints, feature branches, and optional pushes. Agents must not commit,
 push, or switch branches. Unexpected edits, a moved Git HEAD or a branch switch by an agent pause the
-run. `git.push` is disabled by default. A dirty working tree at startup is refused by default; enabling `allow_dirty_start` avoids
-branch switching when the tree is dirty.
+run. `git.push` is disabled by default. A dirty working tree at startup is refused by default;
+`allow_dirty_start` permits branch entry to be attempted, but unexpected changes still pause the run
+and must be resolved before an agent stage continues.
 
 `.orchestrator/config.toml` is intentionally committed on feature branches, alongside the orchestrator's
 checkpoints, so the configured workspace remains available when switching branches.

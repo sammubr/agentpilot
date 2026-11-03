@@ -63,13 +63,12 @@ def add(
     id: Annotated[str, typer.Argument()],
     title: Annotated[str, typer.Argument()],
     description: Annotated[str, typer.Option("--description")],
-    depends_on: Annotated[list[str] | None, typer.Option("--depends-on")] = None,
 ) -> None:
     ws = _workspace(ctx)
     _locked(ws)
     try:
         state = ws.load_state()
-        add_features(state, [{"id": id, "title": title, "description": description, "depends_on": depends_on or []}])
+        add_features(state, [{"id": id, "title": title, "description": description}])
         ws.save_state(state)
     except (OSError, ValueError, KeyError, TypeError) as error:
         _error(str(error))
@@ -105,7 +104,7 @@ def _checks(ws: Workspace) -> list[tuple[str, bool, str]]:
         checks.append(("Config", False, str(error)))
     try:
         state = ws.load_state()
-        add_features(State(), [{**f.model_dump(), "depends_on": f.depends_on} for f in state.features])
+        add_features(State(), [f.model_dump() for f in state.features])
         checks.append(("Backlog", True, "valid"))
     except (OSError, ValueError, KeyError) as error:
         checks.append(("Backlog", False, str(error)))
@@ -209,7 +208,7 @@ def stop(ctx: typer.Context) -> None:
 def _status_data(ws: Workspace, state: State) -> dict:
     run = state.run.model_dump(mode="json")
     features = [
-        f.model_dump(mode="json", include={"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error", "depends_on"})
+        f.model_dump(mode="json", include={"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error"})
         for f in state.features
     ]
     unavailable = {agent.value: until.isoformat() for agent, until in state.unavailable.items()}
@@ -227,8 +226,7 @@ def _format_status(data: dict) -> str:
     for f in data["features"]:
         stage = f["done"][-1] if f["done"] else "-"
         error = f'   error: {f["last_error"]}' if f["last_error"] else ""
-        deps = f' (depends on {", ".join(f["depends_on"])})' if f["depends_on"] else ""
-        lines.append(f'  {f["id"]}{deps}: {f["status"]}   last stage: {stage}   round: {f["round"]}   attempts: {f["attempts"]}{error}')
+        lines.append(f'  {f["id"]}: {f["status"]}   last stage: {stage}   round: {f["round"]}   attempts: {f["attempts"]}{error}')
     return "\n".join(lines)
 
 

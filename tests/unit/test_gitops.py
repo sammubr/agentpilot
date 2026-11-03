@@ -29,6 +29,45 @@ def test_branch_create_reuse(tmp_path):
     assert sha2 is not None
 
 
+def test_branch_is_created_from_explicit_start_point(tmp_path):
+    _init_repo(tmp_path)
+    base = gitops.current_branch(tmp_path)
+
+    gitops.ensure_branch(tmp_path, "feature/child", start_point=base)
+
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, "feature/child"],
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+def test_existing_branch_with_wrong_parent_is_refused(tmp_path):
+    import pytest
+
+    _init_repo(tmp_path)
+    base = gitops.current_branch(tmp_path)
+    gitops.ensure_branch(tmp_path, "feature/parent", start_point=base)
+    (tmp_path / "parent.txt").write_text("parent")
+    subprocess.run(["git", "add", "parent.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "parent"], cwd=tmp_path, check=True)
+    gitops.ensure_branch(tmp_path, base)
+    gitops.ensure_branch(tmp_path, "feature/child", start_point=base)
+
+    child_before = subprocess.run(
+        ["git", "rev-parse", "feature/child"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    with pytest.raises(gitops.GitError, match="ancestry|based"):
+        gitops.ensure_branch(tmp_path, "feature/child", start_point="feature/parent")
+
+    child_after = subprocess.run(
+        ["git", "rev-parse", "feature/child"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert child_after == child_before
+    assert gitops.current_branch(tmp_path) == "feature/child"
+
+
 def test_commit_all_raises_giterror(tmp_path):
     import subprocess
 
@@ -76,6 +115,37 @@ def _init_repo(path):
     (path / "a.txt").write_text("x")
     subprocess.run(["git", "add", "a.txt"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "x"], cwd=path, check=True)
+
+
+def test_default_branch_uses_remote_head_instead_of_current_checkout(tmp_path):
+    _init_repo(tmp_path)
+    default = gitops.current_branch(tmp_path)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", f"refs/remotes/origin/{default}", head], cwd=tmp_path, check=True
+    )
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{default}"],
+        cwd=tmp_path,
+        check=True,
+    )
+    gitops.ensure_branch(tmp_path, "work", start_point=default)
+
+    assert gitops.current_branch(tmp_path) == "work"
+    assert gitops.default_branch(tmp_path) == default
+
+
+def test_default_branch_requires_a_resolvable_remote_head(tmp_path):
+    import pytest
+
+    _init_repo(tmp_path)
+    subprocess.run(["git", "branch", "-m", "topic-a"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "branch", "topic-b"], cwd=tmp_path, check=True)
+
+    with pytest.raises(gitops.GitError, match="default branch"):
+        gitops.default_branch(tmp_path)
 
 
 def test_nested_repos_without_root_git(tmp_path):

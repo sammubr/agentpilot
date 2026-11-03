@@ -5,7 +5,9 @@ import json
 from typer.testing import CliRunner
 
 from ai_development_orchestrator.cli import app
-from ai_development_orchestrator.models import Feature, FeatureStatus, Stage
+from ai_development_orchestrator.config import load_config
+from ai_development_orchestrator.engine import Engine
+from ai_development_orchestrator.models import Feature, FeatureStatus, Stage, State
 
 runner = CliRunner()
 
@@ -17,8 +19,9 @@ def invoke(workspace, *args: str, env: dict | None = None):
 def test_cli_lifecycle_and_status(workspace, scenario):
     assert invoke(workspace, "add", "F1", "First", "--description", "Feature one").exit_code == 0
     backlog = workspace.orch / "backlog.yaml"
-    backlog.write_text("features:\n  - id: F2\n    title: Second\n    description: Feature two\n    depends_on: [F1]\n")
+    backlog.write_text("features:\n  - id: F2\n    title: Second\n    description: Feature two\n    depends_on: [MISSING]\n")
     assert invoke(workspace, "import", str(backlog)).exit_code == 0
+    assert invoke(workspace, "add", "F3", "Third", "--description", "Feature three", "--depends-on", "F2").exit_code == 2
     check = invoke(workspace, "check")
     assert check.exit_code == 0, check.output
 
@@ -28,13 +31,56 @@ def test_cli_lifecycle_and_status(workspace, scenario):
     assert "Run finished" in result.output
     assert [f.status for f in workspace.load_state().features] == [FeatureStatus.completed] * 2
     text = invoke(workspace, "status")
-    assert text.exit_code == 0 and ": finished" in text.output and "F2 (depends on F1): completed" in text.output
+    assert text.exit_code == 0 and ": finished" in text.output and "F2: completed" in text.output
+    assert "depends on" not in text.output
     data = json.loads(invoke(workspace, "status", "--json").output)
     assert set(data) == {"run", "running", "unavailable", "features"}
     assert data["run"]["status"] == "finished" and data["running"] is False
-    assert set(data["features"][0]) == {"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error", "depends_on"}
+    assert set(data["features"][0]) == {"id", "title", "status", "spec_dir", "done", "round", "attempts", "last_error"}
     events = {json.loads(line)["event"] for line in workspace.events_path.read_text().splitlines()}
     assert {"run_started", "stage_started", "agent_finished", "stage_completed", "feature_completed", "run_ended"} <= events
+
+
+def test_status_shows_current_and_later_pending_features(workspace):
+    state = State(version=2, features=[
+        Feature(id="A", title="First", description="active", status=FeatureStatus.in_progress),
+        Feature(id="B", title="Second", description="pending"),
+        Feature(id="C", title="Third", description="pending"),
+    ])
+    state.run.feature = "A"
+    state.run.stage = Stage.specify
+    workspace.save_state(state)
+
+    text = invoke(workspace, "status")
+    assert "Current: A" in text.output
+    assert "A: in_progress" in text.output
+    assert "B: pending" in text.output
+    assert "C: pending" in text.output
+
+    data = json.loads(invoke(workspace, "status", "--json").output)
+    assert [feature["id"] for feature in data["features"]] == ["A", "B", "C"]
+    assert all("depends_on" not in feature for feature in data["features"])
+
+
+def test_status_reports_blocked_head_and_later_pending_features(workspace, scenario, monkeypatch):
+    state = State(version=2, features=[
+        Feature(id="A", title="Alpha", description="blocked feature"),
+        Feature(id="B", title="Beta", description="later feature"),
+        Feature(id="C", title="Gamma", description="later feature"),
+    ])
+    workspace.save_state(state)
+    monkeypatch.setenv("FAKE_AGENT_SCENARIO", scenario({"claude": {"converge:alpha": "append"}}))
+    config = load_config(workspace.config_path)
+    config.convergence.max_corrections = 0
+
+    assert Engine(workspace, config, sleep=lambda _: None, handle_signals=False).run() == "finished"
+
+    text = invoke(workspace, "status")
+    assert "blocked at A" in text.output
+    assert "B: pending" in text.output and "C: pending" in text.output
+    data = json.loads(invoke(workspace, "status", "--json").output)
+    assert "A" in data["run"]["reason"]
+    assert [feature["status"] for feature in data["features"]] == ["blocked", "pending", "pending"]
 
 
 def test_init_creates_only_owned_files(target_repo):

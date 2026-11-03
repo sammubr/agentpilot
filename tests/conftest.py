@@ -36,6 +36,18 @@ def target_repo(tmp_path):
     (repo / "specs").mkdir(exist_ok=True)
     subprocess.run(["git", "add", ".specify", ".claude", ".opencode"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "add-specify"], cwd=repo, check=True)
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{branch}", head], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"],
+        cwd=repo,
+        check=True,
+    )
     return repo
 
 

@@ -109,7 +109,30 @@ def test_v1_state_is_migrated(tmp_path):
     state = ws.load_state()
     f1, f0 = state.features
     assert state.version == 2
-    assert f1.status == "pending" and f1.depends_on == ["F0"] and f1.branch == "orchestrator/F1"
+    assert f1.status == "pending" and f1.branch == "orchestrator/F1"
+    assert not hasattr(f1, "depends_on")
     assert f1.done == ["specify", "clarify", "plan", "tasks", "analyze", "implement"]
     assert f0.status == "blocked"
     assert state.run.status == "idle"
+
+
+def test_v2_state_with_legacy_dependency_data_loads(tmp_path):
+    import json
+
+    ws = Workspace(tmp_path)
+    ws.init()
+    ws.state_path.write_text(json.dumps({
+        "version": 2,
+        "features": [{
+            "id": "F1",
+            "title": "first",
+            "description": "legacy state",
+            "depends_on": ["F0"],
+        }],
+    }))
+
+    feature = ws.load_state().features[0]
+
+    assert feature.id == "F1"
+    assert not hasattr(feature, "depends_on")
+    assert getattr(feature, "branch_base", None) is None

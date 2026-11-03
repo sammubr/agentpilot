@@ -59,10 +59,10 @@ class Feature(BaseModel):
     id: str
     title: str
     description: str
-    depends_on: list[str] = Field(default_factory=list)
     status: FeatureStatus = FeatureStatus.pending
     spec_dir: str | None = None
     branch: str | None = None
+    branch_base: str | None = None
     done: list[Stage] = Field(default_factory=list)
     round: int = 0
     attempts: int = 0
@@ -122,7 +122,6 @@ def _migrate_feature(item: dict) -> dict:
         done.append(Stage.implement)
     return {
         "id": item["id"], "title": item["title"], "description": item["description"],
-        "depends_on": [dep["id"] if isinstance(dep, dict) else dep for dep in item.get("dependencies", [])],
         "status": status, "spec_dir": item.get("spec_dir"), "branch": item.get("branch"), "done": done,
     }
 
